@@ -22,6 +22,7 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0016](0016-sandbox-isolamento-arquivos-e-rede.md) | F-16 | Sandbox com isolamento de arquivos e rede; autonomia total dentro, nada fora | M1 |
 | [0017](0017-multiagente-so-em-spec-e-diagnostico.md) | F-17 | Multiagente orquestrador-trabalhadores só em spec e diagnóstico | M3, M6 |
 | [0018](0018-evals-no-modelo-anthropic.md) | F-18 | Evals no modelo da Anthropic (capacidade/regressão, pass@k/pass^k, ablação) | M8 |
+| [0019](0019-autenticacao-do-botao-de-panico.md) | M1-08 | Botão de pânico autenticado por bearer de alta entropia; só o hash na configuração | M1 |
 
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 

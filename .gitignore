@@ -8,3 +8,8 @@ build/
 __pycache__/
 *.log
 .DS_Store
+
+*.pem
+*.key
+.pytest_cache/
+.ruff_cache/
