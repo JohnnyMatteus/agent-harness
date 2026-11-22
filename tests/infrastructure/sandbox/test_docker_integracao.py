@@ -1,7 +1,8 @@
 """Execução real (Docker + git); roda só no CI: `pytest -m integration`.
 
-Pré-requisitos do job: imagem `forja-sandbox:latest` (infra/sandbox/Dockerfile) e a rede
-`forja-sandbox-net` (--internal) com o proxy Squid `forja-egress-proxy` (infra/sandbox/squid.conf).
+Pré-requisitos do job (criados por `infra/sandbox/preparar.sh`): imagem `forja-sandbox:latest`,
+rede `forja-sandbox-net` (--internal) e o proxy Squid `forja-egress-proxy`
+(infra/sandbox/squid.conf).
 """
 
 import subprocess
@@ -46,15 +47,29 @@ async def test_ciclo_sem_root_e_arquivos_restritos(repo: Path, tmp_path: Path):
         assert (await ativo.executar(["id", "-u"])).stdout.strip() != "0"
         assert (await ativo.executar(["touch", "/etc/x"])).codigo_saida != 0
         assert (await ativo.executar(["touch", "ok.txt"])).codigo_saida == 0
-        assert (
-            await ativo.executar(
-                [
-                    "python",
-                    "-c",
-                    "import urllib.request as u;u.urlopen('http://example.com',timeout=5)",
-                ]
-            )
-        ).codigo_saida != 0
+        # Direto, sem proxy: a rede interna não tem rota externa.
+        direto = await ativo.executar(
+            [
+                "python",
+                "-c",
+                "import urllib.request as u;"
+                "u.build_opener(u.ProxyHandler({})).open('http://example.com',timeout=5)",
+            ]
+        )
+        assert direto.codigo_saida != 0
+        # Pelo proxy: ele tem de estar de pé e recusar o que está fora da allowlist (403),
+        # senão a falha acima poderia ser só "proxy ausente".
+        via_proxy = await ativo.executar(
+            [
+                "python",
+                "-c",
+                "import urllib.request as u,urllib.error as e,sys\n"
+                "try: u.urlopen('http://example.com',timeout=10)\n"
+                "except e.HTTPError as x: sys.exit(0 if x.code == 403 else 2)\n"
+                "sys.exit(3)",
+            ]
+        )
+        assert via_proxy.codigo_saida == 0, via_proxy.stderr
     finally:
         await sb.destruir("it1")
     assert not ativo.worktree.exists()

@@ -6,6 +6,8 @@ A execução real (Docker) é exercitada no CI; os testes unitários usam um Cli
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +22,26 @@ from forja.infrastructure.sandbox.proxy_egress import ambiente_proxy
 from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
 
 DIR_CONTAINER = "/workspace"
+USUARIO_PADRAO = "10001:10001"
+
+
+def usuario_efetivo(cfg: "ConfigDocker") -> str:
+    """Usuário sem root do container. O worktree pertence ao processo; o container precisa
+    escrever nele sem relaxar permissão (um runner Linux tem uid 1001, não 10001)."""
+    if cfg.usuario:
+        return cfg.usuario
+    uid, gid = os.getuid(), os.getgid()
+    return f"{uid}:{gid}" if uid != 0 and gid != 0 else USUARIO_PADRAO
+
+
+def _entregar_worktree(worktree: Path, usuario: str) -> None:
+    """Só quando o processo é root: o worktree passa ao usuário sem root do container."""
+    if os.getuid() != 0:
+        return
+    uid, gid = (int(x) for x in usuario.split(":"))
+    for raiz, dirs, arquivos in os.walk(worktree):
+        for nome in (raiz, *(os.path.join(raiz, n) for n in (*dirs, *arquivos))):
+            shutil.chown(nome, uid, gid)
 
 
 class CliDocker(Protocol):
@@ -43,7 +65,9 @@ class ConfigDocker:
     imagem: str = "forja-sandbox:latest"
     rede_interna: str = "forja-sandbox-net"
     url_proxy: str = "http://forja-egress-proxy:3128"
-    usuario: str = "10001:10001"
+    # Vazio: o uid:gid do dono do worktree (o do processo, se não for root); com o processo
+    # em root, cai em USUARIO_PADRAO e o worktree é entregue a ele. Nunca roda como root.
+    usuario: str = ""
     memoria: str = "2g"
     cpus: str = "2"
     pids: int = 512
@@ -73,7 +97,7 @@ def argumentos_run(spec: EspecSandbox, worktree: Path, cfg: ConfigDocker) -> lis
         "run", "-d", "--rm",
         "--name", nome_container(spec.sessao_id),
         "--label", f"forja.sessao={spec.sessao_id}",
-        "--user", cfg.usuario,
+        "--user", usuario_efetivo(cfg),
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
         "--cap-drop", "ALL",
@@ -107,6 +131,7 @@ class DockerSandbox:
         worktree = await self._wt.criar(spec.sessao_id, repo, spec.ref)
         self._repos[spec.sessao_id] = repo
         try:
+            _entregar_worktree(worktree, usuario_efetivo(self._cfg))
             res = await self._docker(*argumentos_run(spec, worktree, self._cfg))
             if res.codigo_saida != 0:
                 raise SandboxError(f"docker run falhou: {res.stderr.strip()}")

@@ -35,6 +35,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      - name: Imagem do sandbox, rede interna e proxy de saída
+        run: infra/sandbox/preparar.sh
       # Código 5 do pytest = nenhum teste de integração coletado (ainda).
       - run: uv run pytest -m integration || test $? -eq 5
 
