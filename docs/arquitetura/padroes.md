@@ -14,3 +14,5 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Idempotência por versão de conteúdo | `IndexarRepositorio` | Reexecutar (webhook repetido, retry do Temporal) não duplica nem reescreve |
 | Escopo obrigatório na assinatura (isolamento por construção) | `IndiceDeTrechos`, `RecuperarConhecimento` | Esquecer o filtro vira erro de tipo, não vazamento |
 | Defesa em profundidade | `RecuperarConhecimento` descarta trecho de outro escopo | O índice pode ter defeito; o caso de uso não confia |
+| Capability token (escopo assinado) | `token_sessao.py`, `interfaces/mcp/knowledge.py` | O modelo não escolhe o escopo; a ferramenta nem tem o parâmetro |
+| Closure sobre o escopo da sessão | `criar_servidor` | O escopo é capturado uma vez, na construção, e não circula como dado |
