@@ -12,3 +12,5 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Value Object | `Escopo`, `Trecho` (imutáveis, validados na criação) | O isolamento por organização e repositório não pode ser esquecido nem alterado |
 | Função pura no domínio | `fundir_rrf` | Regra de fusão testável sem infraestrutura |
 | Idempotência por versão de conteúdo | `IndexarRepositorio` | Reexecutar (webhook repetido, retry do Temporal) não duplica nem reescreve |
+| Escopo obrigatório na assinatura (isolamento por construção) | `IndiceDeTrechos`, `RecuperarConhecimento` | Esquecer o filtro vira erro de tipo, não vazamento |
+| Defesa em profundidade | `RecuperarConhecimento` descarta trecho de outro escopo | O índice pode ter defeito; o caso de uso não confia |
