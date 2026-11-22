@@ -1,0 +1,36 @@
+[project]
+name = "forja"
+version = "0.1.0"
+description = "Forja: harness autônomo de engenharia com RAG"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "pyright>=1.1.380",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["forja"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: precisa de Docker (testcontainers); roda só no CI"]
+
+[tool.pyright]
+include = ["forja", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
