@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +29,11 @@ def usuario_efetivo(cfg: ConfigDocker) -> str:
     """Usuário sem root do container. O worktree pertence ao processo; o container precisa
     escrever nele sem relaxar permissão (um runner Linux tem uid 1001, não 10001)."""
     if cfg.usuario:
+        m = re.fullmatch(r"([0-9]+):([0-9]+)", cfg.usuario)
+        if m is None or int(m[1]) == 0 or int(m[2]) == 0:
+            raise SandboxError(
+                f"usuario do sandbox deve ser uid:gid numerico sem root: {cfg.usuario!r}"
+            )
         return cfg.usuario
     uid, gid = os.getuid(), os.getgid()
     return f"{uid}:{gid}" if uid != 0 and gid != 0 else USUARIO_PADRAO
@@ -39,9 +44,10 @@ def _entregar_worktree(worktree: Path, usuario: str) -> None:
     if os.getuid() != 0:
         return
     uid, gid = (int(x) for x in usuario.split(":"))
+    # lchown: o worktree é conteúdo não confiável; symlink nunca é seguido para fora dele.
     for raiz, dirs, arquivos in os.walk(worktree):
         for nome in (raiz, *(os.path.join(raiz, n) for n in (*dirs, *arquivos))):
-            shutil.chown(nome, uid, gid)
+            os.lchown(nome, uid, gid)
 
 
 class CliDocker(Protocol):

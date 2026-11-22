@@ -7,6 +7,7 @@ from forja.application.portas.sandbox import EspecSandbox, ResultadoComando, San
 from forja.infrastructure.sandbox.docker import (
     ConfigDocker,
     DockerSandbox,
+    _entregar_worktree,
     argumentos_run,
     usuario_efetivo,
 )
@@ -123,3 +124,28 @@ def test_usuario_e_o_do_worktree_quando_nao_root_e_nunca_root(monkeypatch):
     monkeypatch.setattr("os.getuid", lambda: 0)
     assert usuario_efetivo(ConfigDocker()) == "10001:10001"
     assert usuario_efetivo(ConfigDocker(usuario="10001:10001")) == "10001:10001"
+
+
+@pytest.mark.parametrize("u", ["0:0", "0", "root", "1000:0", "0:1000", "a:b", "10001:"])
+def test_usuario_configurado_que_nao_e_uid_gid_sem_root_e_recusado(u):
+    with pytest.raises(SandboxError):
+        usuario_efetivo(ConfigDocker(usuario=u))
+
+
+def test_entrega_do_worktree_nunca_toca_o_alvo_de_symlink(tmp_path, monkeypatch):
+    fora = tmp_path / "fora"
+    fora.mkdir()
+    (fora / "shadow").write_text("x")
+    wt = tmp_path / "wt"
+    (wt / "sub").mkdir(parents=True)
+    (wt / "real.txt").write_text("r")
+    (wt / "link_arq").symlink_to(fora / "shadow")
+    (wt / "link_dir").symlink_to(fora, target_is_directory=True)
+    tocados: list[str] = []
+    monkeypatch.setattr("os.getuid", lambda: 0)
+    monkeypatch.setattr("os.lchown", lambda p, u, g: tocados.append(str(p)))
+    monkeypatch.setattr("os.chown", lambda *a, **k: tocados.append("CHOWN"))
+    _entregar_worktree(wt, "10001:10001")
+    assert str(wt / "link_arq") in tocados and str(wt / "link_dir") in tocados
+    assert "CHOWN" not in tocados
+    assert not any(t.startswith(str(fora)) for t in tocados)
