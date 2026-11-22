@@ -9,9 +9,13 @@ eval enxerga a proteção. Nenhum modelo é chamado: isto mede o código determi
 
 from __future__ import annotations
 
+import inspect
 import re
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,12 +26,14 @@ from forja.domain import revisao as revisao_mod
 from forja.domain import seguranca as seguranca_mod
 from forja.domain.artefatos import ArtefatoInvalido
 from forja.domain.bandas import Amostra, Banda, Bandas, BandasInvalidas, EstadoDaBanda
+from forja.domain.erros import ErroDeDominio
 from forja.domain.guardrails import Decisao, Etapa, PoliticaDeSessao
 from forja.domain.politica import Politica, Tier
 from forja.domain.revisao import ArquivoDoDiff, DiffDaEntrega
 from forja.infrastructure.agents import sessao_com_ferramentas as sessao_mod
 from forja.infrastructure.github import cliente as cliente_mod
 from forja.infrastructure.github.cliente import GitHubCliente
+from forja.infrastructure.telemetry.bandas_do_operador import BandasDoOperador
 from forja.infrastructure.temporal import operacao as operacao_mod
 from forja.infrastructure.temporal.activities import DeliveryActivities, DeployEntrada
 
@@ -42,6 +48,8 @@ class Caso:
     origem: str  # a falha real que este caso protege
     executar: Callable[[], Awaitable[None]]
     desligar: Callable[[pytest.MonkeyPatch], None]
+    # SHAs em que o caso FALHA (verificado contra `git archive`); vazio = invariante, nunca falhou
+    falhava_em: tuple[str, ...] = ()
 
 
 def _politica(altos: list[str], baixos: list[str]) -> Politica:
@@ -93,11 +101,18 @@ def desligar_caminho_longo(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(politica_mod, "MAX_CAMINHO", 10**9)
 
 
+def _classificar(p: Politica, caminhos: list[str]) -> Any:
+    """`intent_id` (artefatos da própria intenção) só existe depois do fix do M5."""
+    if "intent_id" in inspect.signature(p.classificar).parameters:
+        return p.classificar(caminhos, [], 5, ID)
+    return p.classificar(caminhos, [], 5)
+
+
 async def ci_e_forja_sao_alto_risco() -> None:
     p = _politica(["infra/**"], ["docs/**", ".github/**", ".forja/**"])
     for caminho in (".github/workflows/ci.yml", ".forja/policy.yaml", ".forja/outra/spec.md"):
-        assert p.classificar([caminho], [], 5, ID).tier is Tier.ALTO, caminho
-    assert p.classificar(["docs/a.md"], [], 5, ID).tier is Tier.BAIXO
+        assert _classificar(p, [caminho]).tier is Tier.ALTO, caminho
+    assert _classificar(p, ["docs/a.md"]).tier is Tier.BAIXO
 
 
 def desligar_ci_e_forja(mp: pytest.MonkeyPatch) -> None:
@@ -106,6 +121,8 @@ def desligar_ci_e_forja(mp: pytest.MonkeyPatch) -> None:
 
 async def rename_traz_a_origem() -> None:
     p = _politica(["infra/**"], ["docs/**"])
+    campos = inspect.signature(ArquivoDoDiff).parameters
+    assert "anterior" in campos, "o diff não registra a origem de um rename"
     d = DiffDaEntrega((ArquivoDoDiff("docs/main.tf", "renamed", 0, 0, "", "infra/main.tf"),), SHA)
     assert p.classificar(d.caminhos, [], 0).tier is Tier.ALTO
 
@@ -118,6 +135,9 @@ def desligar_rename(mp: pytest.MonkeyPatch) -> None:
 
 async def arquivo_sem_patch_nao_e_baixo() -> None:
     p = _politica(["infra/**"], ["docs/**"])
+    assert hasattr(revisao_mod, "elevar_por_diff_incompleto"), (
+        "nada eleva o risco de diff incompleto"
+    )
     binario = DiffDaEntrega((ArquivoDoDiff("docs/blob.bin", "added", 0, 0, ""),), SHA)
     base = p.classificar(binario.caminhos, [], 0)
     assert revisao_mod.elevar_por_diff_incompleto(base, binario).tier >= Tier.MEDIO
@@ -132,6 +152,9 @@ def desligar_sem_patch(mp: pytest.MonkeyPatch) -> None:
 
 async def avanco_por_rename_nao_e_so_o_review() -> None:
     review = ".forja/x/review.md"
+    assert hasattr(GitHubCliente, "avanco"), (
+        "não há como saber o que a branch ganhou depois da revisão"
+    )
     c = _cliente(
         {
             f"/repos/{REPO}/compare/": {
@@ -239,7 +262,7 @@ async def sem_dado_nao_e_saudavel() -> None:
         async def serie(self, consulta: str, janela: int, passo: int, fim: float) -> list[Amostra]:
             return []
 
-    ativ = operacao_mod.AtividadesDeOperacao(Fonte(), Vazia(), None, None, frozenset({REPO}))  # type: ignore[arg-type]
+    ativ = _atividades(Fonte(), Vazia())
     (r,) = await ActivityEnvironment().run(ativ.checar_bandas, REPO)
     assert r.estado == EstadoDaBanda.SEM_DADOS
     nan = [Amostra(1000.0 - 60 * i, float("nan")) for i in range(11)]
@@ -270,13 +293,120 @@ def desligar_max_finito(mp: pytest.MonkeyPatch) -> None:
 async def monitor_reconfere_a_lista_do_operador() -> None:
     from temporalio.testing import ActivityEnvironment
 
-    ativ = operacao_mod.AtividadesDeOperacao(None, None, None, None, frozenset({"acme/outro"}))  # type: ignore[arg-type]
-    (r,) = await ActivityEnvironment().run(ativ.checar_bandas, REPO)
-    assert r.estado == operacao_mod.ESTADO_DESATIVADO
+    assert "repositorios" in inspect.signature(operacao_mod.AtividadesDeOperacao).parameters, (
+        "o monitor não tem a lista do operador para reconferir"
+    )
+    ativ = _atividades(_FonteComUmaBanda(), _SemSerie(), frozenset({"acme/outro"}))
+    resultado = await ActivityEnvironment().run(ativ.checar_bandas, REPO)
+    assert resultado and str(resultado[0].estado) == "desativado", "seguiu monitorando"
 
 
 def desligar_lista_do_operador(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(operacao_mod.AtividadesDeOperacao, "_permitido", lambda self, repo: True)
+
+
+# --- M6: defeitos reais que escaparam (08909c6) -------------------------------------------------
+
+
+def _atividades(
+    fonte: object, metricas: object = None, repos: frozenset[str] | None = None
+) -> operacao_mod.AtividadesDeOperacao:
+    """Instancia nos dois SHAs: a lista do operador (`repositorios`) só existe depois do fix."""
+    parametros = inspect.signature(operacao_mod.AtividadesDeOperacao).parameters
+    args: list[object] = [fonte, metricas, None, None]
+    if "repositorios" in parametros:
+        args.append(repos if repos is not None else frozenset({REPO}))
+    return operacao_mod.AtividadesDeOperacao(*args)  # type: ignore[arg-type]
+
+
+class _FonteDoOperador:
+    def __init__(self, pasta: Path) -> None:
+        self._bandas = BandasDoOperador(pasta)
+
+    async def bandas(self, repositorio: str) -> Bandas | None:
+        return await self._bandas.bandas(repositorio)
+
+    async def deploys_recentes(self, repositorio: str) -> list[str]:
+        return []
+
+
+class _FonteComUmaBanda:
+    async def bandas(self, repositorio: str) -> Bandas | None:
+        return Bandas.de_dict(
+            {"service": "s", "bands": [{"id": "lat", "query": "q", "max": 0.3, "for": "5m"}]}
+        )
+
+    async def deploys_recentes(self, repositorio: str) -> list[str]:
+        return []
+
+
+class _SemSerie:
+    async def serie(self, *args: object) -> list[Amostra]:
+        return []
+
+
+async def _checar(conteudo: bytes | None) -> list[Any]:
+    """O que `checar_bandas` devolve para um repositório monitorado com este arquivo do operador.
+    Exceção da produção vira falha do grader (o monitor cairia), não erro do eval."""
+    from temporalio.testing import ActivityEnvironment
+
+    with tempfile.TemporaryDirectory() as pasta:
+        if conteudo is not None:
+            (Path(pasta) / "acme__loja.yaml").write_bytes(conteudo)
+        ativ = _atividades(_FonteDoOperador(Path(pasta)), _SemSerie())
+        try:
+            return await ActivityEnvironment().run(ativ.checar_bandas, REPO)
+        except (ErroDeDominio, ValueError, OSError) as erro:
+            raise AssertionError(
+                f"a produção levantou {type(erro).__name__}: o monitor cairia"
+            ) from erro
+
+
+def _sem_dados_unico(resultado: list[Any]) -> None:
+    assert len(resultado) == 1, f"devolveu {len(resultado)} verificações: parece saudável"
+    assert str(getattr(resultado[0], "estado", "")) == "sem_dados"
+
+
+async def bandas_ausentes_ou_vazias_sao_sem_dados() -> None:
+    _sem_dados_unico(await _checar(None))  # arquivo ausente: nunca `[]`
+    _sem_dados_unico(await _checar(b"service: s\nbands: []\n"))  # `bands: []`
+
+
+async def bandas_ilegiveis_sao_sem_dados_sem_excecao() -> None:
+    _sem_dados_unico(await _checar(b"service: [\n  x: : :\n"))  # YAML quebrado
+    _sem_dados_unico(await _checar(b"service: \xff\xfe\n"))  # não UTF-8
+
+
+def desligar_tolerancia_a_bandas(mp: pytest.MonkeyPatch) -> None:
+    async def antigo(self: object, repositorio: str) -> list[object]:
+        bandas = await self._bandas.bandas(repositorio)  # type: ignore[attr-defined]  # sem try
+        if bandas is None or not bandas.bandas:
+            return []
+        return [operacao_mod.VerificacaoDto(b.id, "dentro") for b in bandas.bandas]
+
+    mp.setattr(operacao_mod.AtividadesDeOperacao, "checar_bandas", antigo)
+
+
+async def for_de_2m_com_60s_acima_nao_viola() -> None:
+    dois = Banda("b", "q", 5, 120)
+    s = [Amostra(1000.0 - 60 * (4 - i), v) for i, v in enumerate([1, 1, 1, 9, 9])]
+    estado = bandas_mod.avaliar_banda(dois, s, 1000.2, 60)[0]
+    assert estado is EstadoDaBanda.DENTRO, (
+        f"deu {estado}: só 60 s acima do teto de uma janela de 120 s"
+    )
+
+
+def desligar_janela_do_for(mp: pytest.MonkeyPatch) -> None:
+    def antigo(
+        banda: Banda, serie: list[Amostra], agora: float, passo: int
+    ) -> tuple[EstadoDaBanda, str]:
+        janela = [
+            a for a in serie if a.instante >= agora - banda.por_segundos
+        ]  # sem a que cobre o início
+        viola = bool(janela) and all(a.valor > banda.maximo for a in janela)
+        return (EstadoDaBanda.VIOLADA if viola else EstadoDaBanda.DENTRO), ""
+
+    mp.setattr(bandas_mod, "avaliar_banda", antigo)
 
 
 # --- M4 e M3: guardrails e entrada não confiável ---------------------------------------------
@@ -340,72 +470,104 @@ CASOS: tuple[Caso, ...] = (
         "deploy/**.tf deixou de casar deploy/prod/main.tf",
         glob_de_segmento,
         desligar_glob,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m5-caminho-longo",
         "caminho > 400 caracteres escapava como risco baixo",
         caminho_longo,
         desligar_caminho_longo,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m5-ci-e-forja",
         ".github/** e .forja/** não eram sempre alto risco",
         ci_e_forja_sao_alto_risco,
         desligar_ci_e_forja,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m5-rename",
         "renomear de infra/ para docs/ saía como risco baixo",
         rename_traz_a_origem,
         desligar_rename,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m5-sem-patch",
         "binário sem patch saía como risco baixo",
         arquivo_sem_patch_nao_e_baixo,
         desligar_sem_patch,
+        falhava_em=("1f844c5", "142305f"),
     ),
     Caso(
         "m5-avanco-rename",
         "rename para o review.md passava como só o review",
         avanco_por_rename_nao_e_so_o_review,
         desligar_avanco,
+        falhava_em=("1f844c5", "142305f"),
     ),
     Caso(
         "m5-allowlist-de-checks",
         "startup_failure e stale contavam como verde",
         conclusao_fora_da_allowlist_nao_e_verde,
         desligar_allowlist,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m5-statuses-paginados",
         "o 31º commit status falhava e saía verde",
         status_31_falhou_na_segunda_pagina,
         desligar_paginacao,
+        falhava_em=("1f844c5", "142305f"),
     ),
     Caso(
         "m5-sha-fixado",
         "o merge usava a ponta atual, não o SHA revisado",
         merge_so_do_sha_revisado,
         desligar_pin_de_sha,
+        falhava_em=("1f844c5",),
     ),
     Caso(
         "m6-sem-dados",
-        "série vazia ou NaN virava 'sem violação'",
+        "invariante (não foi o defeito real do M6): série vazia ou NaN é sem dados",
         sem_dado_nao_e_saudavel,
         desligar_sem_dados,
+    ),
+    Caso(
+        "m6-bandas-ausentes",
+        "bandas ausentes ou `bands: []` devolviam lista vazia (parecia saudável)",
+        bandas_ausentes_ou_vazias_sao_sem_dados,
+        desligar_tolerancia_a_bandas,
+        falhava_em=("08909c6",),
+    ),
+    Caso(
+        "m6-bandas-ilegiveis",
+        "YAML quebrado ou não UTF-8 derrubava o monitor",
+        bandas_ilegiveis_sao_sem_dados_sem_excecao,
+        desligar_tolerancia_a_bandas,
+        falhava_em=("08909c6",),
+    ),
+    Caso(
+        "m6-janela-for",
+        "`for: 2m` com só 60 s acima do teto dava violada",
+        for_de_2m_com_60s_acima_nao_viola,
+        desligar_janela_do_for,
+        falhava_em=("08909c6",),
     ),
     Caso(
         "m6-max-nao-finito",
         "max NaN ou infinito dava 'dentro'",
         max_nao_finito_e_recusado,
         desligar_max_finito,
+        falhava_em=("08909c6",),
     ),
     Caso(
         "m6-lista-do-operador",
         "repo removido do monitor seguia abrindo issue",
         monitor_reconfere_a_lista_do_operador,
         desligar_lista_do_operador,
+        falhava_em=("08909c6",),
     ),
     Caso(
         "m4-hook-nega-por-padrao",

@@ -13,9 +13,21 @@ from tests.evals.seguranca.casos import CASOS
 pytestmark = pytest.mark.eval_regressao
 
 
+def test_cada_caso_diz_se_reproduz_falha_historica_ou_e_invariante() -> None:
+    """`falhava_em`: SHAs contra cujo `git archive` o caso foi rodado e falhou (ADR 0047)."""
+    historicos = {c.id for c in CASOS if c.falhava_em}
+    invariantes = {c.id for c in CASOS if not c.falhava_em}
+    assert len(historicos) == 14 and invariantes == {
+        "m6-sem-dados",  # série vazia/NaN nunca foi o defeito real do M6
+        "m4-hook-nega-por-padrao",  # os buracos do M4 foram corrigidos antes destes casos
+        "m3-caminho-do-modelo",
+        "m3-saida-nao-confiavel",
+    }
+
+
 def test_ha_casos_de_varias_origens_e_ids_unicos() -> None:
     ids = [c.id for c in CASOS]
-    assert len(CASOS) >= 12 and len(set(ids)) == len(ids)
+    assert len(CASOS) == 18 and len(set(ids)) == len(ids)
     assert {i.split("-")[0] for i in ids} == {"m3", "m4", "m5", "m6"}
     assert all(c.origem.strip() for c in CASOS)
 
