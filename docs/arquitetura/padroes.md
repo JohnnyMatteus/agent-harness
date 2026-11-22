@@ -18,3 +18,5 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Closure sobre o escopo da sessão | `criar_servidor` | O escopo é capturado uma vez, na construção, e não circula como dado |
 | Golden file / baseline versionada | `evals/rag/baseline.json`, `avaliacao.py` | Regressão de métrica falha o teste; mudar corpus exige renovar a baseline de propósito |
 | Test double determinístico | `EmbedderFalso` | Reprodutível e sem rede; declara no próprio resultado o que não prova |
+| Composition root fino | `interfaces/mcp/composicao.py`, `interfaces/cli/indexar.py` | A ligação com o ambiente fica na borda; configuração ruim falha, não improvisa |
+| Fail fast em configuração | `configuracao.py` | Embedder real inexistente não é simulado |
