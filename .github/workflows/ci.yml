@@ -35,8 +35,21 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      # Código 5 do pytest = nenhum teste de integração coletado (ainda).
-      - run: uv run pytest -m integration || test $? -eq 5
+      - name: Imagem do sandbox, rede interna e proxy de saída
+        shell: bash
+        run: infra/sandbox/preparar.sh 2>&1 | tee "$RUNNER_TEMP/preparar.txt"
+      - name: Testes de integração
+        shell: bash
+        run: uv run pytest -m integration 2>&1 | tee "$RUNNER_TEMP/pytest.txt"
+      - name: Diagnóstico (anotações)
+        if: failure()
+        shell: bash
+        run: |
+          docker ps -a --format '{{.Names}} {{.Status}}' > "$RUNNER_TEMP/docker-ps.txt" 2>&1 || true
+          docker logs --tail 40 forja-egress-proxy > "$RUNNER_TEMP/proxy.txt" 2>&1 || true
+          python3 infra/ci/anotar.py integracao \
+            "pytest=$RUNNER_TEMP/pytest.txt" "preparar=$RUNNER_TEMP/preparar.txt" \
+            "proxy=$RUNNER_TEMP/proxy.txt" "containers=$RUNNER_TEMP/docker-ps.txt"
 
   compose:
     runs-on: ubuntu-latest
