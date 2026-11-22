@@ -21,6 +21,10 @@ class RelatorioDeIndexacao:
     recusados: dict[str, int] = field(default_factory=lambda: {})
 
 
+def _nao_lido(caminho: str, nao_lidos: tuple[str, ...]) -> bool:
+    return any(p == "." or caminho == p or caminho.startswith(p + "/") for p in nao_lidos)
+
+
 class IndexarRepositorio:
     """Reindexa só o que mudou: compara o SHA do conteúdo (mais a versão do pipeline).
 
@@ -82,6 +86,8 @@ class IndexarRepositorio:
 
         removidos = 0
         for caminho in existentes.keys() - presentes:
+            if _nao_lido(caminho, varredura.nao_lidos):
+                continue
             self._indice.remover_arquivo(escopo, caminho)
             removidos += 1
 

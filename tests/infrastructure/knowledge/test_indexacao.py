@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from forja.application.casos_de_uso.indexar_repositorio import IndexarRepositorio
+from forja.application.portas.knowledge import Varredura
 from forja.domain.knowledge import Escopo, Trecho
 from forja.infrastructure.knowledge.chunker import ChunkerEstrutural
 from forja.infrastructure.knowledge.contexto import ContextoPorEstrutura
@@ -103,3 +104,44 @@ def test_trecho_carrega_commit_contexto_e_id_estavel(tmp_path: Path) -> None:
     outro = IndiceEmMemoria()
     montar(tmp_path, outro).executar(ESCOPO)
     assert outro.obter_simbolo(ESCOPO, "a.py", "a")[0].id == trecho.id
+
+
+def test_diretorio_nao_lido_nao_apaga_o_que_ja_estava_indexado(tmp_path: Path) -> None:
+    class FonteComFalha:
+        def __init__(self, base: VarreduraDeDiretorio, nao_lidos: tuple[str, ...]) -> None:
+            self.base, self.nao_lidos = base, nao_lidos
+
+        def varrer(self) -> Varredura:
+            v = self.base.varrer()
+            return Varredura(
+                v.commit,
+                tuple(a for a in v.arquivos if a.caminho != "pkg/x.py"),
+                v.recusados,
+                self.nao_lidos,
+            )
+
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "x.py").write_text("def x():\n    return 1\n")
+    (tmp_path / "pkg2.py").write_text("def p():\n    return 1\n")
+    indice = IndiceEspiao()
+    montar(tmp_path, indice).executar(ESCOPO)
+    base = VarreduraDeDiretorio(tmp_path, "abc123")
+    caso = IndexarRepositorio(
+        FonteComFalha(base, ("pkg",)),
+        ChunkerEstrutural(),
+        EmbedderFalso(32),
+        ContextoPorEstrutura(),
+        indice,
+    )
+    caso.executar(ESCOPO)
+    assert "pkg/x.py" in indice.versoes_por_arquivo(ESCOPO)
+    assert indice.remocoes == []
+    caso = IndexarRepositorio(
+        FonteComFalha(base, ()),
+        ChunkerEstrutural(),
+        EmbedderFalso(32),
+        ContextoPorEstrutura(),
+        indice,
+    )
+    caso.executar(ESCOPO)
+    assert indice.remocoes == ["pkg/x.py"]

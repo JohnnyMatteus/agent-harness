@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from forja.infrastructure.knowledge.chunker import ChunkerEstrutural
 from forja.infrastructure.knowledge.varredura import VarreduraDeDiretorio, contem_segredo
 
 # Montados em tempo de execução para não deixar nada parecido com segredo no repositório.
@@ -39,7 +40,7 @@ def test_nao_segue_symlink_de_arquivo_nem_de_diretorio(tmp_path: Path) -> None:
     os.symlink(fora, raiz / "dir")
     arquivos, recusados = varrer(raiz)
     assert list(arquivos) == ["ok.py"]
-    assert recusados == {"symlink_ou_ilegivel": 1}
+    assert recusados == {"symlink": 1}
 
 
 @pytest.mark.parametrize(
@@ -85,3 +86,44 @@ def test_ignora_diretorios_de_dependencia(tmp_path: Path) -> None:
 
 def test_texto_comum_nao_e_segredo() -> None:
     assert not contem_segredo("token = obter_token()\npassword = None\n")
+
+
+@pytest.mark.timeout(10)
+def test_fifo_nao_trava_a_varredura(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "pipe.md")
+    (tmp_path / "ok.md").write_text("# x\n")
+    arquivos, recusados = varrer(tmp_path)
+    assert list(arquivos) == ["ok.md"]
+    assert recusados == {"nao_regular": 1}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignora permissões")
+def test_diretorio_ilegivel_fica_em_nao_lidos(tmp_path: Path) -> None:
+    (tmp_path / "bloqueado").mkdir()
+    (tmp_path / "bloqueado" / "a.py").write_text("x = 1\n")
+    (tmp_path / "ok.py").write_text("y = 1\n")
+    (tmp_path / "bloqueado").chmod(0)
+    try:
+        v = VarreduraDeDiretorio(tmp_path, "c").varrer()
+    finally:
+        (tmp_path / "bloqueado").chmod(0o700)
+    assert [a.caminho for a in v.arquivos] == ["ok.py"]
+    assert v.nao_lidos == ("bloqueado",)
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize(
+    "linha",
+    [
+        "# a" + " " * 200_000 + "b",
+        "#" * 200_000,
+        "# " + "a #" * 70_000,
+        "password" + " " * 200_000,
+        "password=" + '"' + "a" * 200_000,
+        "ghp_" + "a" * 200_000,
+    ],
+)
+def test_linha_hostil_enorme_nao_trava(tmp_path: Path, linha: str) -> None:
+    (tmp_path / "a.md").write_text(linha)
+    VarreduraDeDiretorio(tmp_path, "c").varrer()
+    ChunkerEstrutural().dividir("a.md", linha)

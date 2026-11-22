@@ -6,6 +6,7 @@ Recusas são contadas por motivo; o conteúdo recusado nunca é devolvido nem lo
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -63,13 +64,19 @@ class VarreduraDeDiretorio:
 
     def varrer(self) -> Varredura:
         aceitos: list[ArquivoFonte] = []
+        nao_lidos: list[str] = []
         recusados: dict[str, int] = {}
         total = 0
 
         def recusar(motivo: str) -> None:
             recusados[motivo] = recusados.get(motivo, 0) + 1
 
-        for diretorio, subdiretorios, nomes in os.walk(self._raiz, followlinks=False):
+        def erro_de_diretorio(erro: OSError) -> None:
+            nao_lidos.append(self._relativo(Path(str(erro.filename or self._raiz))))
+
+        for diretorio, subdiretorios, nomes in os.walk(
+            self._raiz, followlinks=False, onerror=erro_de_diretorio
+        ):
             subdiretorios[:] = sorted(
                 d
                 for d in subdiretorios
@@ -78,6 +85,10 @@ class VarreduraDeDiretorio:
             for nome in sorted(nomes):
                 caminho = Path(diretorio) / nome
                 motivo, conteudo = self._ler(caminho, nome)
+                if motivo == "ilegivel":
+                    nao_lidos.append(self._relativo(caminho))
+                    recusar(motivo)
+                    continue
                 if motivo:
                     recusar(motivo)
                     continue
@@ -86,13 +97,20 @@ class VarreduraDeDiretorio:
                     recusar("limite_total")
                     continue
                 total += len(conteudo)
-                relativo = PurePosixPath(*caminho.relative_to(self._raiz).parts).as_posix()
+                relativo = self._relativo(caminho)
                 aceitos.append(
                     ArquivoFonte(
                         relativo, conteudo.decode("utf-8"), hashlib.sha256(conteudo).hexdigest()
                     )
                 )
-        return Varredura(self._commit, tuple(aceitos), recusados)
+        return Varredura(self._commit, tuple(aceitos), recusados, tuple(nao_lidos))
+
+    def _relativo(self, caminho: Path) -> str:
+        try:
+            partes = caminho.relative_to(self._raiz).parts
+        except ValueError:
+            return "."
+        return PurePosixPath(*partes).as_posix() if partes else "."
 
     def _ler(self, caminho: Path, nome: str) -> tuple[str | None, bytes | None]:
         if NOMES_DE_SEGREDO.search(nome):
@@ -100,10 +118,11 @@ class VarreduraDeDiretorio:
         if caminho.suffix.lower() not in self._extensoes:
             return "extensao", None
         try:
-            # O_NOFOLLOW fecha a janela entre o teste de symlink e a abertura.
-            descritor = os.open(caminho, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
-            return "symlink_ou_ilegivel", None
+            # O_NOFOLLOW fecha a janela entre o teste de symlink e a abertura; O_NONBLOCK evita
+            # que a abertura de um FIFO sem escritor bloqueie para sempre.
+            descritor = os.open(caminho, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as erro:
+            return ("symlink" if erro.errno == errno.ELOOP else "ilegivel"), None
         try:
             info = os.fstat(descritor)
             if not stat.S_ISREG(info.st_mode):

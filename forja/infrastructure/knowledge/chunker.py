@@ -27,7 +27,6 @@ LINGUAGENS_DE_TEXTO = {
 }
 EXTENSOES_SUPORTADAS = frozenset(LINGUAGENS_DE_CODIGO) | frozenset(LINGUAGENS_DE_TEXTO)
 
-_CABECALHO = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
 _CERCA = re.compile(r"^\s*(```|~~~)")
 
 
@@ -68,6 +67,18 @@ def _gramatica_typescript() -> _Gramatica:
         frozenset({"method_definition"}),
         "body",
     )
+
+
+def _cabecalho(linha: str) -> tuple[int, str] | None:
+    """Parsing linear (sem regex com retrocesso): linhas hostis e enormes não travam o indexador."""
+    nivel = len(linha) - len(linha.lstrip("#"))
+    if not 1 <= nivel <= 6 or len(linha) == nivel or linha[nivel] not in " \t":
+        return None
+    texto = linha[nivel:].strip()
+    sem_fecho = texto.rstrip("#")
+    if sem_fecho != texto and (not sem_fecho or sem_fecho[-1] in " \t"):
+        texto = sem_fecho.rstrip()
+    return (nivel, texto) if texto else None
 
 
 def _nome(no: Node) -> str | None:
@@ -188,11 +199,11 @@ class ChunkerEstrutural:
         for i, linha in enumerate(linhas):
             if _CERCA.match(linha):
                 em_cerca = not em_cerca
-            elif not em_cerca and (m := _CABECALHO.match(linha)):
-                nivel = len(m.group(1))
+            elif not em_cerca and (cab := _cabecalho(linha)):
+                nivel, titulo = cab
                 while pilha and pilha[-1][0] >= nivel:
                     pilha.pop()
-                pilha.append((nivel, m.group(2)))
+                pilha.append((nivel, titulo))
                 secoes.append((i, " > ".join(t for _, t in pilha)))
         brutos: list[TrechoBruto] = []
         for n, (inicio, simbolo) in enumerate(secoes):

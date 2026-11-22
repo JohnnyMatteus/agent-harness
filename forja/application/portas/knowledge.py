@@ -21,6 +21,9 @@ class Varredura:
     commit: str
     arquivos: tuple[ArquivoFonte, ...]
     recusados: dict[str, int] = field(default_factory=lambda: {})
+    # Caminhos ou diretórios (prefixo) que não puderam ser lidos agora: o que existe no índice
+    # sob eles não pode ser removido, porque "não li" não é "foi apagado".
+    nao_lidos: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
