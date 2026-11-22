@@ -10,6 +10,10 @@ from enum import StrEnum
 from forja.domain.erros import ErroDeDominio
 
 
+class ConsultaInvalida(ErroDeDominio):
+    """Consulta ou paginação acima dos tetos; os parâmetros podem vir de um modelo."""
+
+
 class TipoDeTrecho(StrEnum):
     CODIGO = "codigo"
     ADR = "adr"
