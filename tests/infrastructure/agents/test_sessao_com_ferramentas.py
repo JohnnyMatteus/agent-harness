@@ -65,6 +65,18 @@ async def test_hook_bloqueia_pelo_ponto_de_entrada_e_registra_o_bloqueio() -> No
     assert (len(bloqueios) == 9 and bloqueios[0][0] == "Edit") or len(bloqueios) == 9
 
 
+async def test_ferramenta_descoberta_por_busca_passa_pelo_mesmo_hook_e_e_auditada() -> None:
+    """Se um dia o tool search (nativo do CLI) estiver ligado, descobrir uma ferramenta não a
+    permite: ela só roda se estiver na allowlist da política, e a negação aparece na auditoria."""
+    bloqueios: list[tuple[str, str]] = []
+    hook = hook_pre_tool_use(POLITICA, lambda n, m: bloqueios.append((n, m)))
+    for descoberta in ("mcp__github__criar_issue", "mcp__knowledge__search", "ToolSearch"):
+        assert negou(await chamar(hook, descoberta, query="qualquer"))
+    assert [n for n, _ in bloqueios] == [
+        "mcp__github__criar_issue", "mcp__knowledge__search", "ToolSearch",
+    ]  # fmt: skip
+
+
 async def test_ferramenta_de_memoria_passa_e_exec_so_roda_o_que_a_politica_permite() -> None:
     hook = hook_pre_tool_use(POLITICA)
     assert await chamar(hook, FERRAMENTA_MEMORIA, command="view", path="/memories") == {}
