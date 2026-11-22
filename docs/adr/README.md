@@ -29,6 +29,7 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0050](0050-indexacao-incremental-por-sha-e-ingestao-nao-confiavel.md) | local | Indexação idempotente e incremental por SHA; conteúdo indexado é não confiável | M2 (knowledge) |
 | [0051](0051-recuperacao-hibrida-isolada-por-escopo.md) | local | Recuperação híbrida com RRF, isolada por organização e repositório na consulta | M2 (knowledge) |
 | [0052](0052-mcp-knowledge-escopo-do-token-da-sessao.md) | local | MCP knowledge: escopo vem do token da sessão, nunca de argumento do modelo | M2 (knowledge) |
+| [0053](0053-avaliacao-do-rag-com-embeddings-falsos-no-ci.md) | local | Avaliação do RAG no CI com corpus inventado e embeddings falsos, métricas versionadas | M2 (knowledge) |
 
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 

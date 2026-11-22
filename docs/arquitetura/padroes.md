@@ -16,3 +16,5 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Defesa em profundidade | `RecuperarConhecimento` descarta trecho de outro escopo | O índice pode ter defeito; o caso de uso não confia |
 | Capability token (escopo assinado) | `token_sessao.py`, `interfaces/mcp/knowledge.py` | O modelo não escolhe o escopo; a ferramenta nem tem o parâmetro |
 | Closure sobre o escopo da sessão | `criar_servidor` | O escopo é capturado uma vez, na construção, e não circula como dado |
+| Golden file / baseline versionada | `evals/rag/baseline.json`, `avaliacao.py` | Regressão de métrica falha o teste; mudar corpus exige renovar a baseline de propósito |
+| Test double determinístico | `EmbedderFalso` | Reprodutível e sem rede; declara no próprio resultado o que não prova |
