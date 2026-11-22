@@ -82,7 +82,7 @@ class _Base:
         ativo = await self._sandbox.criar(EspecSandbox(sessao, self._clone(ctx.repositorio)))
         try:
             await self._remoto.buscar(ctx.repositorio, ctx.branch, ativo.worktree)
-            await self._area.garantir_branch(ativo.worktree, ctx.branch)
+            await self._area.destacar(ativo.worktree)
         except BaseException:
             await destruir_mesmo_cancelado(self._sandbox, sessao)
             raise

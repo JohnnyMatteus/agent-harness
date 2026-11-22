@@ -221,7 +221,7 @@ async def test_fetch_e_push_da_branch_nao_leem_configuracao_do_worktree(
     )
     remoto, area = RemotoGitHub(None, base=str(remotos), dry_run=False), AreaGit()
     assert await remoto.buscar("acme/loja", BRANCH, repo) is False
-    await area.garantir_branch(repo, BRANCH)
+    await area.destacar(repo)
     (repo / "src" / "b.py").write_text("z")
     await area.commitar(repo, "f1")
     await remoto.enviar("acme/loja", BRANCH, repo)
@@ -229,6 +229,11 @@ async def test_fetch_e_push_da_branch_nao_leem_configuracao_do_worktree(
     outro = await GerenciadorWorktree(tmp_path / "wt2").criar("s2", origem)
     assert await remoto.buscar("acme/loja", BRANCH, outro) is True
     assert (outro / "src" / "b.py").read_text() == "z"
+    # A branch da entrega nunca vira branch local do clone: dois worktrees na mesma branch são
+    # recusados pelo git mais novo (CI), e aqui os dois (repo e outro) coexistem em HEAD destacado.
+    assert sh("git", "branch", "--list", BRANCH, cwd=origem).strip() == ""
+    assert sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=outro).strip() == "HEAD"
+    assert sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=repo).strip() == "HEAD"
 
 
 @pytest.mark.parametrize(

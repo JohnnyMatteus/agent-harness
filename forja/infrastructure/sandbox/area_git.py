@@ -187,8 +187,8 @@ class AreaGit:
     async def head(self, worktree: Path) -> str:
         return (await git(worktree, "rev-parse", "HEAD")).decode().strip()
 
-    async def garantir_branch(self, worktree: Path, branch: str) -> None:
-        await git(worktree, "checkout", "-q", "-B", branch)
+    async def destacar(self, worktree: Path) -> None:
+        await git(worktree, "checkout", "-q", "--detach")
 
     async def _recusar_gitlink(self, worktree: Path, raiz: str) -> None:
         """Gitlink (modo 160000) na árvore de `raiz`: lido dos objetos, sem depender de listar o

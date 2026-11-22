@@ -15,8 +15,10 @@ class AreaDeTrabalho(Protocol):
 
     async def head(self, worktree: Path) -> str: ...
 
-    async def garantir_branch(self, worktree: Path, branch: str) -> None:
-        """Deixa o worktree na branch da entrega (criando-a a partir do HEAD se preciso)."""
+    async def destacar(self, worktree: Path) -> None:
+        """Deixa o worktree em HEAD destacado. A branch da entrega nunca é criada no clone: o
+        git recusa a mesma branch em dois worktrees (sessões, verificação e retentativa
+        coexistem no mesmo clone), e o nome só existe no push (`HEAD:refs/heads/<branch>`)."""
         ...
 
     async def mudancas(self, worktree: Path, base: str) -> list[MudancaDeArquivo]:

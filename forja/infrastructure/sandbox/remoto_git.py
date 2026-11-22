@@ -71,7 +71,8 @@ class RemotoGitHub:
             if "couldn't find remote ref" in str(erro):
                 return False
             raise
-        await git(worktree, "checkout", "-q", "-B", branch, "FETCH_HEAD")
+        # HEAD destacado: a mesma branch em dois worktrees do clone é recusada pelo git.
+        await git(worktree, "checkout", "-q", "--detach", "FETCH_HEAD")
         return True
 
     async def enviar(self, repositorio: str, branch: str, worktree: Path) -> None:
