@@ -8,7 +8,7 @@ Harness autônomo de engenharia com RAG: a infraestrutura em volta do modelo que
 
 Em times com agentes de código, o gargalo deixou de ser escrever código e passou a ser planejar, revisar e entregar. Sem estrutura, o agente perde contexto entre sessões, ninguém sabe por que uma mudança foi feita e não há como limitar o que ele pode fazer sozinho. A Forja transforma uma issue em uma entrega rastreável: cada etapa produz um artefato versionado (`intent.md`, `spec.md`, `plan.md`, `review.md`), humanos decidem onde o risco exige, e a cadeia de commits serve de auditoria.
 
-## Estado atual (M1, fundação)
+## Estado atual (M1 fechado)
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
@@ -19,6 +19,8 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | Ambiente local: Postgres+pgvector, Redis, Temporal dev server, Phoenix | |
 | `DeliveryWorkflow` no Temporal (teste com test server), agente eco e telemetria | |
 | Sandbox Docker efêmero (sem root, `--read-only`, rede interna, proxy Squid em allowlist), ADR 0032 | |
+| Binário `forja serve` e `forja worker` (ADR 0033): webhook verificado, `DeliveryWorkflow`, sandbox, agente eco, comentário publicado só pelo workflow (dry-run por padrão, ADR 0034), trace único e `/metrics` | |
+| Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); a variante com Docker real roda no CI | |
 
 RAG, política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 
@@ -122,7 +124,6 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 ## Próximos passos
 
-- M1 restante: trace ponta a ponta e teste de integração completo (o do sandbox roda no CI via `infra/sandbox/preparar.sh`).
 - Aprovação humana com rejeição (hoje não há aresta no diagrama).
 - Política de risco e hooks (M5), recuperação híbrida com pgvector e BM25 (M2), evals contínuos (M8).
 - Helm e implantação em cluster.

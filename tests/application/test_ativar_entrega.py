@@ -94,3 +94,20 @@ async def test_panico_cancela_todas() -> None:
     entregas = EntregasFalsas()
     assert await AcionarPanico(entregas).executar() == 3
     assert entregas.em_andamento == 0
+
+
+async def test_repositorio_fora_da_lista_habilitada_e_ignorado_e_vazia_recusa_tudo() -> None:
+    entregas = EntregasFalsas()
+    permissoes = Permissoes({"maria"})
+    habilitado = AtivarEntrega(entregas, permissoes, frozenset({"ACME-demo/loja-exemplo"}))
+    assert await habilitado.executar(CRIAR) == "iniciada"
+    outro = CriarIntent(OrigemExterna("acme-demo/outro", 1, "u"), "t", "c", "maria")
+    assert await habilitado.executar(outro) == "ignorada"
+    assert await AtivarEntrega(entregas, permissoes, frozenset()).executar(CRIAR) == "ignorada"
+
+
+async def test_nome_de_repositorio_malformado_e_ignorado() -> None:
+    ativar, entregas = caso()
+    ruim = CriarIntent(OrigemExterna("../etc/passwd", 1, "u"), "t", "c", "maria")
+    assert await ativar.executar(ruim) == "ignorada"
+    assert not entregas.iniciadas

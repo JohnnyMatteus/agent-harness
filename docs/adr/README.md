@@ -27,6 +27,10 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0031](0031-limite-de-ciclos-build-test-configuravel.md) | local | Limite de ciclos Test/Build configurável, padrão 3 | M1 (domínio) |
 | [0032](0032-sandbox-fusao-0008-0016.md) | local | Sandbox: fusão proposta dos ADRs 0008 e 0016 (substituiria o 0016 ao aceitar) | M1 (sandbox) |
 
+| [0033](0033-binario-e-raiz-de-composicao.md) | local | Binário `forja` (serve e worker), raiz de composição única, eco como etapa Plan do M1 | M1 |
+| [0034](0034-escrita-externa-dry-run-e-idempotencia.md) | local | Escrita externa em dry-run por padrão e idempotência atômica por chave | M1 em diante |
+| [0035](0035-ativacao-so-em-repositorios-habilitados.md) | local | Ativação só em repositórios habilitados, nome validado na entrada | M1 em diante |
+
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 
 Onde o design doc não registra alternativas, o ADR diz isso explicitamente em vez de inventar; o autor completa antes de aceitar.

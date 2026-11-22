@@ -39,8 +39,7 @@ async def test_confirmar_avanca_de_plan_para_design(env):
         assert await h.query(DeliveryWorkflow.etapa_atual) == "plan"
         await h.signal(DeliveryWorkflow.confirmar)
         saida = await h.result()
-    assert saida.etapas_executadas[0] == "design"
-    assert saida.etapas_executadas[:3] == ["design", "build", "test"]
+    assert saida.etapas_executadas[:4] == ["plan", "design", "build", "test"]
 
 
 async def test_parar_cancela_workflow_e_activity_em_curso(env):

@@ -7,18 +7,36 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
+
+from forja.application.portas.publicador import Publicador
+from forja.infrastructure.telemetry.metricas import MetricasForja
 
 
 @dataclass(frozen=True)
 class EtapaEntrada:
     intent_id: str
     etapa: str
+    # Contexto da origem. `titulo` e `corpo` são texto não confiável: só viram dado delimitado.
+    repositorio: str = ""
+    numero: int = 0
+    titulo: str = ""
+    corpo: str = ""
 
 
 @dataclass(frozen=True)
 class EtapaSaida:
     etapa: str
     resumo: str = ""
+    texto: str = ""
+
+
+@dataclass(frozen=True)
+class PublicarEntrada:
+    repositorio: str
+    numero: int
+    corpo: str
+    chave: str
 
 
 class ExecutorDeEtapa(Protocol):
@@ -30,13 +48,37 @@ async def executor_noop(entrada: EtapaEntrada) -> EtapaSaida:
 
 
 class DeliveryActivities:
-    """Agrupa as activities com o executor injetado (o agente eco entra aqui no M1-12)."""
+    """Agrupa as activities com o executor, o publicador e as métricas injetados."""
 
     def __init__(
-        self, executor: ExecutorDeEtapa = executor_noop, intervalo_heartbeat_s: float = 5.0
+        self,
+        executor: ExecutorDeEtapa = executor_noop,
+        intervalo_heartbeat_s: float = 5.0,
+        publicador: Publicador | None = None,
+        metricas: MetricasForja | None = None,
     ) -> None:
         self._executor = executor
         self._intervalo = intervalo_heartbeat_s
+        self._publicador = publicador
+        self._metricas = metricas
+
+    @activity.defn(name="publicar_comentario")
+    async def publicar_comentario(self, entrada: PublicarEntrada) -> str:
+        """Única escrita externa do fluxo; idempotente por `chave`."""
+        if self._publicador is None:
+            raise ApplicationError("publicador não configurado", non_retryable=True)
+        return await self._publicador.comentar(
+            entrada.repositorio, entrada.numero, entrada.corpo, entrada.chave
+        )
+
+    @activity.defn(name="registrar_desfecho")
+    async def registrar_desfecho(self, desfecho: str) -> None:
+        if self._metricas is None:
+            return
+        if desfecho == "concluida":
+            self._metricas.concluidas.inc()
+        elif desfecho == "erro":
+            self._metricas.com_erro.inc()
 
     @activity.defn(name="executar_etapa")
     async def executar_etapa(self, entrada: EtapaEntrada) -> EtapaSaida:
