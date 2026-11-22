@@ -1,0 +1,9 @@
+# Imagem do sandbox para agentes COM ferramenta (Executor): o CLI do Claude roda aqui dentro
+# (lançador em modo docker, ADR 0036). Não é construída no CI nem por `preparar.sh`.
+# Versão do CLI = a do CLI empacotado no claude-agent-sdk do uv.lock (2.1.330).
+FROM forja-sandbox:latest
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g @anthropic-ai/claude-code@2.1.330 \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
+USER 10001:10001

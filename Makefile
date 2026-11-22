@@ -1,7 +1,7 @@
 COMPOSE := docker compose --profile core --profile observability
 
 .DEFAULT_GOAL := help
-.PHONY: help install up up-all down logs ps lint format typecheck test test-integration check clean
+.PHONY: agente-imagem help install up up-all down logs ps lint format typecheck test test-integration check clean
 
 help: ## Lista os alvos
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -40,6 +40,9 @@ test: ## Testes unitários (rápidos, sem Docker)
 
 test-integration: ## Testes de integração (precisam de Docker)
 	uv run pytest -m integration
+
+agente-imagem: ## Constrói a imagem do sandbox com o CLI (precisa de forja-sandbox:latest)
+	docker build -t forja-agente:latest -f infra/sandbox/Dockerfile.agente infra/sandbox
 
 check: lint typecheck test ## O mesmo que o CI roda
 

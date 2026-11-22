@@ -26,6 +26,8 @@ with workflow.unsafe.imports_passed_through():
         ArtefatoEntrada,
         EtapaEntrada,
         EtapaSaida,
+        HarnessEntrada,
+        HarnessSaida,
         PrEntrada,
         PublicarEntrada,
     )
@@ -40,6 +42,8 @@ class Desfecho(StrEnum):
     CANCELADA = "cancelada"
     REJEITADA = "rejeitada"
     ARTEFATOS_PUBLICADOS = "artefatos_publicados"
+    VERIFICADA = "verificada"
+    FALHOU = "falhou"
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,11 @@ class DeliveryEntrada:
     slug: str = "intent"
     # Quem pediu (logins em minúsculas): só eles confirmam o intent. Vazio não restringe.
     solicitantes: list[str] = field(default_factory=list[str])
+    # Build de longa duração (M4): só com `harness` o workflow passa do PR de artefatos.
+    harness: bool = False
+    rodadas_sem_progresso: int = 3
+    max_blocos: int = 20
+    timeout_bloco_s: float = 4 * 3600
 
 
 @dataclass
@@ -220,9 +229,90 @@ class DeliveryWorkflow:
         build = await self._executar(entrada, "build")  # Planner
         self._artefatos["plan.md"] = build.texto
         await self._commitar(entrada, "plan.md", "build")
-        self._pr_url = await self._abrir_pr(entrada)
+        if entrada.harness and entrada.repositorio:
+            return await self._build_de_longa_duracao(entrada, entrega)
+        self._pr_url = await self._abrir_pr(entrada, verificado=False)
         await self._comentar(entrada, "pr", f"PR de artefatos aberto em rascunho: {self._pr_url}")
         return Desfecho.ARTEFATOS_PUBLICADOS
+
+    async def _build_de_longa_duracao(self, entrada: DeliveryEntrada, entrega: Entrega) -> Desfecho:
+        """Build (Inicializador, blocos com contrato e Avaliador) e Test, na máquina de estados.
+
+        Uma falha de bloco devolve o feedback ao próximo bloco; sem progresso por
+        `rodadas_sem_progresso` rodadas seguidas, a entrega falha para um humano."""
+        base = self._harness_entrada(entrada)
+        iniciado = await self._harness("harness_inicializar", base, entrada)
+        self._custo += iniciado.custo_usd
+        feedback, sem_progresso, n = "", 0, 0
+        completa = False
+        while not completa:
+            n += 1
+            if n > entrada.max_blocos:
+                return await self._falhar(entrada, f"limite de {entrada.max_blocos} blocos")
+            r = await self._harness(
+                "harness_bloco", self._harness_entrada(entrada, n, feedback), entrada
+            )
+            self._custo += r.custo_usd
+            completa = r.completa
+            feito = ", ".join(r.aprovadas) or "nenhuma"
+            falta = ", ".join(r.reprovadas) or "nenhuma"
+            await self._comentar(
+                entrada,
+                f"bloco-{n}",
+                f"Bloco {n}: aprovadas {feito}; reprovadas {falta}."
+                + (
+                    f" Sessões descartadas por violar a política: {r.violacoes}."
+                    if r.violacoes
+                    else ""
+                ),
+            )
+            sem_progresso = 0 if r.aprovadas else sem_progresso + 1
+            feedback = "" if r.aprovadas else r.feedback
+            if sem_progresso >= entrada.rodadas_sem_progresso:
+                return await self._falhar(
+                    entrada, f"{sem_progresso} blocos seguidos sem funcionalidade aprovada"
+                )
+        entrega.concluir_build()
+        verificacao = await self._harness("harness_verificar", base, entrada)
+        if not verificacao.verde:
+            entrega.registrar_verificacao(verde=False)
+            return await self._falhar(
+                entrada, "verificação final falhou em: " + ", ".join(verificacao.reprovadas)
+            )
+        entrega.registrar_verificacao(verde=True)  # Test -> Review (PRAberto)
+        self._pr_url = await self._abrir_pr(entrada, verificado=True)
+        await self._comentar(
+            entrada,
+            "verificada",
+            f"Verificação verde em todas as funcionalidades. PR em rascunho: {self._pr_url}. "
+            "A revisão é a próxima etapa.",
+        )
+        return Desfecho.VERIFICADA
+
+    def _harness_entrada(
+        self, e: DeliveryEntrada, bloco: int = 0, feedback: str = ""
+    ) -> HarnessEntrada:
+        return HarnessEntrada(
+            e.repositorio, e.intent_id, e.slug, bloco, dict(self._artefatos), feedback
+        )
+
+    async def _harness(
+        self, nome: str, entrada_h: HarnessEntrada, entrada: DeliveryEntrada
+    ) -> HarnessSaida:
+        return await workflow.execute_activity(
+            nome,
+            entrada_h,
+            result_type=HarnessSaida,
+            start_to_close_timeout=timedelta(seconds=entrada.timeout_bloco_s),
+            heartbeat_timeout=timedelta(seconds=entrada.heartbeat_s),
+            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+            retry_policy=RetryPolicy(maximum_attempts=2, non_retryable_error_types=NAO_REPETIR),
+        )
+
+    async def _falhar(self, entrada: DeliveryEntrada, motivo: str) -> Desfecho:
+        self._motivo = motivo
+        await self._comentar(entrada, "falhou", f"Entrega interrompida para um humano: {motivo}.")
+        return Desfecho.FALHOU
 
     # --- portões -----------------------------------------------------------------------
 
@@ -313,13 +403,17 @@ class DeliveryWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
         )
 
-    async def _abrir_pr(self, entrada: DeliveryEntrada) -> str:
+    async def _abrir_pr(self, entrada: DeliveryEntrada, verificado: bool) -> str:
         if not entrada.repositorio:
             return ""
+        situacao = (
+            "O código foi implementado e todas as funcionalidades passaram na verificação."
+            if verificado
+            else "Em rascunho: o código ainda não foi implementado."
+        )
         corpo = (
             f"Entrega da intent `{entrada.intent_id}` (issue #{entrada.numero}). "
-            f"Artefatos em `.forja/{entrada.intent_id}/`. Em rascunho: o código ainda não foi "
-            "implementado.\n\n"
+            f"Artefatos em `.forja/{entrada.intent_id}/`. {situacao}\n\n"
             + "\n\n".join(self._artefatos[n] for n in ("intent.md", "spec.md", "plan.md"))
         )
         return await workflow.execute_activity(

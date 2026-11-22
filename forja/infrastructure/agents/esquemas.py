@@ -6,6 +6,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from forja.domain.artefatos import Cenario, Fonte, IntentMd, PassoDoPlano, Plano, Spec
+from forja.domain.harness import NOTA_MAXIMA, Criterio
 
 
 class _Saida(BaseModel):
@@ -74,3 +75,48 @@ class PlanoSaida(_Saida):
         return Plano(
             tuple(PassoDoPlano(p.arquivo, p.mudanca, tuple(p.testes)) for p in self.passos)
         )
+
+
+class AvaliacaoSaida(_Saida):
+    notas: dict[str, int]
+    feedback: dict[str, str] = Field(default_factory=dict[str, str])
+    defeitos: list[str] = Field(default_factory=list[str], max_length=30)
+
+    def para_dominio(self) -> tuple[dict[Criterio, int], dict[Criterio, str]]:
+        validos = {c.value for c in Criterio}
+        if set(self.notas) != validos:
+            raise ValueError(f"notas devem cobrir exatamente os critérios {sorted(validos)}")
+        if any(not 0 <= n <= NOTA_MAXIMA for n in self.notas.values()):
+            raise ValueError("nota fora de 0..10")
+        feedback = {Criterio(k): v[:800] for k, v in self.feedback.items() if k in validos}
+        return {Criterio(k): v for k, v in self.notas.items()}, feedback
+
+
+class RevisaoSaida(_Saida):
+    acordo: bool
+    ajustes: list[str] = Field(default_factory=list[str], max_length=20)
+
+
+class SessaoSaida(_Saida):
+    mensagem_de_commit: str = Field(min_length=1, max_length=200)
+    resumo: str = Field(min_length=1, max_length=2000)
+
+
+class FeatureSaida(_Saida):
+    id: str = Field(min_length=1, max_length=40)
+    categoria: str = Field(min_length=1, max_length=60)
+    descricao: str = Field(min_length=1, max_length=500)
+    passos_de_teste: list[str] = Field(min_length=1, max_length=10)
+    comando_de_teste: list[str] = Field(min_length=1, max_length=20)
+
+
+class InicializacaoSaida(_Saida):
+    features: list[FeatureSaida] = Field(min_length=1, max_length=50)
+    comandos_de_setup: list[list[str]] = Field(default_factory=list[list[str]], max_length=10)
+    comando_de_fumaca: list[str] = Field(min_length=1, max_length=20)
+
+
+class ContratoSaida(_Saida):
+    features: list[str] = Field(min_length=1, max_length=10)
+    entregaveis: list[str] = Field(min_length=1, max_length=10)
+    verificacao: list[str] = Field(min_length=1, max_length=10)

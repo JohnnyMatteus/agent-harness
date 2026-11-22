@@ -33,3 +33,19 @@ async def test_gateway_composto_expoe_webhook_panico_e_metricas(
         assert (await http.post("/webhooks/github", content=b"{}")).status_code == 401
         assert (await http.post("/panico")).status_code == 401
         assert "forja_entregas_iniciadas_total" in (await http.get("/metrics")).text
+
+
+def test_harness_falha_fechado_sem_as_condicoes_de_seguranca() -> None:
+    from forja.infrastructure.knowledge.configuracao import ConfiguracaoInvalida
+    from forja.interfaces.cli.composicao import montar_harness
+
+    base = {"FORJA_HARNESS": "true"}
+    casos = [
+        ({}, "FORJA_PUBLICAR"),
+        ({"FORJA_PUBLICAR": "true"}, "DATABASE_URL"),
+        ({"FORJA_PUBLICAR": "true", "DATABASE_URL": "postgresql://x/y"}, "FORJA_MODELO_AVALIADOR"),
+    ]
+    for extra, esperado in casos:
+        ajustes = Ajustes.model_validate({**base, **extra})
+        with pytest.raises(ConfiguracaoInvalida, match=esperado):
+            montar_harness(ajustes, None, None, MetricasForja())  # type: ignore[arg-type]

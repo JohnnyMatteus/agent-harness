@@ -52,6 +52,9 @@ def criar_worker(
             ativ.ler_artefato,
             ativ.abrir_pr,
             ativ.registrar_desfecho,
+            ativ.harness_inicializar,
+            ativ.harness_bloco,
+            ativ.harness_verificar,
         ],
         interceptors=list(interceptors),
         max_cached_workflows=max_cached_workflows,
@@ -82,8 +85,13 @@ class TemporalEntregaGateway:
     """Adaptador da porta `EntregaGateway` sobre o Temporal; o id do workflow é o intent_id."""
 
     def __init__(
-        self, client: Client, task_queue: str = FILA_PADRAO, prazo_lembrete_s: float = 48 * 3600
+        self,
+        client: Client,
+        task_queue: str = FILA_PADRAO,
+        prazo_lembrete_s: float = 48 * 3600,
+        harness: bool = False,
     ) -> None:
+        self._harness = harness
         self._client = client
         self._fila = task_queue
         self._prazo = prazo_lembrete_s
@@ -102,6 +110,7 @@ class TemporalEntregaGateway:
             numero=comando.origem.numero,
             titulo=comando.titulo[:300],
             slug=slugificar(comando.titulo),
+            harness=self._harness,
             url=comando.origem.url,
             solicitantes=[a.lower() for a in (comando.autor, comando.autor_da_issue) if a],
             corpo=comando.corpo[:LIMITE_CORPO],

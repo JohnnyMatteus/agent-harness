@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+from anthropic import AsyncAnthropic
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -11,13 +12,30 @@ from temporalio.worker import Worker
 
 from forja.application.casos_de_uso.acionar_panico import AcionarPanico
 from forja.application.casos_de_uso.ativar_entrega import AtivarEntrega
+from forja.application.casos_de_uso.harness import (
+    ExecutarBloco,
+    HarnessDaEntrega,
+    InicializarHarness,
+    VerificarEntrega,
+)
+from forja.application.casos_de_uso.memoria_do_repositorio import MemoriaDoRepositorio
 from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
 from forja.application.portas.sdlc import PesquisaDeConhecimento
 from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
 from forja.infrastructure.agents.arquivos_git import ListadorGit
-from forja.infrastructure.agents.esquemas import AchadosSaida, IntentSaida, PlanoSaida, SpecSaida
+from forja.infrastructure.agents.avaliador import AvaliadorNaMessagesApi
+from forja.infrastructure.agents.contexto import estrategia_do_modelo
+from forja.infrastructure.agents.esquemas import (
+    AchadosSaida,
+    ContratoSaida,
+    InicializacaoSaida,
+    IntentSaida,
+    PlanoSaida,
+    SpecSaida,
+)
 from forja.infrastructure.agents.estruturado import AgenteEstruturado
 from forja.infrastructure.agents.executor_sdlc import ExecutorSdlc
+from forja.infrastructure.agents.harness_agentes import ExecutorAgente, InicializadorAgente
 from forja.infrastructure.agents.pesquisa_rag import PesquisaRag, SemPesquisa
 from forja.infrastructure.agents.sdlc import (
     EspecificadorMultiagente,
@@ -31,10 +49,15 @@ from forja.infrastructure.github.cliente import GitHubCliente
 from forja.infrastructure.github.config import GitHubConfig
 from forja.infrastructure.github.entregas_vistas import RegistroEntregasRedis
 from forja.infrastructure.github.publicador import PublicadorGitHub
-from forja.infrastructure.knowledge.configuracao import embedder_do_ambiente
+from forja.infrastructure.knowledge.configuracao import ConfiguracaoInvalida, embedder_do_ambiente
 from forja.infrastructure.knowledge.postgres import IndicePostgres
 from forja.infrastructure.persistencia.idempotencia_redis import IdempotenciaRedis
+from forja.infrastructure.persistencia.memoria import ArmazemPostgres
+from forja.infrastructure.sandbox.area_git import AreaGit
+from forja.infrastructure.sandbox.docker import ConfigDocker, DockerSandbox
+from forja.infrastructure.sandbox.remoto_git import RemotoGitHub
 from forja.infrastructure.sandbox.repositorios import RepositoriosLocais
+from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
 from forja.infrastructure.telemetry.metricas import CONTENT_TYPE, MetricasForja
 from forja.infrastructure.telemetry.otel import configurar_tracing, interceptor_temporal
 from forja.infrastructure.temporal.activities import DeliveryActivities
@@ -54,18 +77,18 @@ async def conectar_temporal(ajustes: Ajustes) -> Client:
     )
 
 
-def _github(cfg: GitHubConfig) -> tuple[GitHubCliente, httpx.AsyncClient]:
+def _github(cfg: GitHubConfig) -> tuple[GitHubCliente, GitHubAppAuth, httpx.AsyncClient]:
     http = httpx.AsyncClient(base_url=cfg.api_url, timeout=15.0)
     auth = GitHubAppAuth(cfg.app_id, carregar_chave_privada(), http)
-    return GitHubCliente(auth, http), http
+    return GitHubCliente(auth, http), auth, http
 
 
 def montar_gateway(
     ajustes: Ajustes, client: Client, redis: Redis, metricas: MetricasForja
 ) -> FastAPI:
     cfg = GitHubConfig()  # type: ignore[call-arg]  # segredo vem do ambiente
-    github, _ = _github(cfg)
-    entregas = TemporalEntregaGateway(client)
+    github, _, _ = _github(cfg)
+    entregas = TemporalEntregaGateway(client, harness=ajustes.harness)
     ativar = AtivarEntrega(entregas, github, frozenset(ajustes.repos_habilitados))
     app = criar_app(
         DependenciasWebhook(
@@ -120,13 +143,77 @@ def montar_executor(
     )
 
 
+def montar_harness(
+    ajustes: Ajustes, github: GitHubCliente, auth: GitHubAppAuth, metricas: MetricasForja
+) -> HarnessDaEntrega:
+    """Build de longa duração. Sem condição de segurança atendida, falha em vez de improvisar."""
+    if not ajustes.publicar:
+        raise ConfiguracaoInvalida(
+            "FORJA_HARNESS exige FORJA_PUBLICAR=true: a continuidade vive na branch remota"
+        )
+    if not ajustes.database_url:
+        raise ConfiguracaoInvalida("FORJA_HARNESS exige DATABASE_URL (memória por repositório)")
+    if not ajustes.modelo_avaliador:
+        raise ConfiguracaoInvalida(
+            "FORJA_MODELO_AVALIADOR não definido: a escolha do modelo é do autor"
+        )
+    armazem = ArmazemPostgres(ajustes.database_url)
+    armazem.garantir_esquema()
+
+    def memoria(repositorio: str) -> MemoriaDoRepositorio:
+        return MemoriaDoRepositorio(armazem, repositorio)
+
+    sandbox = DockerSandbox(
+        GerenciadorWorktree(ajustes.worktrees_dir.resolve()),
+        cfg=ConfigDocker(imagem=ajustes.imagem_agente),
+    )
+    repos = RepositoriosLocais(ajustes.repos_dir)
+    area = AreaGit()
+    remoto = RemotoGitHub(auth, dry_run=False)
+
+    def runner(prompt: str) -> AgentSdkRunner:
+        return AgentSdkRunner(carregar_prompt(prompt), modelo=ajustes.modelo)
+
+    executor = ExecutorAgente(
+        runner("executor"),
+        AgenteEstruturado(runner("contratante"), ContratoSaida, "contrato"),
+        memoria,
+        ajustes.modelo,
+        ao_bloquear=lambda ferramenta, _: metricas.bloqueios.labels(ferramenta).inc(),
+    )
+    avaliador = AvaliadorNaMessagesApi(
+        AsyncAnthropic(),
+        ajustes.modelo_avaliador,
+        memoria,
+        estrategia_do_modelo(ajustes.modelo_avaliador),
+    )
+    inicializador = InicializadorAgente(
+        AgenteEstruturado(runner("inicializador"), InicializacaoSaida, "inicializador")
+    )
+    return HarnessDaEntrega(
+        InicializarHarness(sandbox, area, remoto, repos.caminho, inicializador),
+        ExecutarBloco(
+            sandbox,
+            area,
+            remoto,
+            repos.caminho,
+            executor,
+            avaliador,
+            ajustes.tamanho_do_bloco,
+            lambda _: metricas.bloqueios.labels("auditoria").inc(),
+        ),
+        VerificarEntrega(sandbox, area, remoto, repos.caminho),
+    )
+
+
 def montar_worker(
     ajustes: Ajustes, client: Client, redis: Redis, metricas: MetricasForja
 ) -> Worker:
     cfg = GitHubConfig()  # type: ignore[call-arg]
-    github, _ = _github(cfg)
+    github, auth, _ = _github(cfg)
     publicador = PublicadorGitHub(github, IdempotenciaRedis(redis), dry_run=not ajustes.publicar)
+    harness = montar_harness(ajustes, github, auth, metricas) if ajustes.harness else None
     atividades = DeliveryActivities(
-        montar_executor(ajustes), publicador=publicador, metricas=metricas
+        montar_executor(ajustes), publicador=publicador, metricas=metricas, harness=harness
     )
     return criar_worker(client, atividades)

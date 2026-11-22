@@ -174,21 +174,29 @@ def _clone(raiz: Path) -> None:
     destino = raiz / REPO
     (destino / "src").mkdir(parents=True)
     (destino / "src" / "auth.py").write_text("def login(): ...\n")
+    (destino / "tests").mkdir()
+    (destino / "tests" / "test_smoke.py").write_text("def test_s():\n    assert True\n")
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run([*git, "init", "-q"], cwd=destino, check=True)
     subprocess.run([*git, "add", "."], cwd=destino, check=True)
     subprocess.run([*git, "commit", "-q", "-m", "i"], cwd=destino, check=True)
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def temporal():
-    async with await WorkflowEnvironment.start_time_skipping() as e:
-        yield e
-
-
 @pytest_asyncio.fixture(loop_scope="module")
 async def amb(
     temporal: WorkflowEnvironment, chave_pem: str, tmp_path: Path, monkeypatch
+) -> AsyncIterator[Ambiente]:
+    async with ambiente(temporal, chave_pem, tmp_path, monkeypatch) as a:
+        yield a
+
+
+@contextlib.asynccontextmanager
+async def ambiente(
+    temporal: WorkflowEnvironment,
+    chave_pem: str,
+    tmp_path: Path,
+    monkeypatch,
+    montar_harness: Callable[[Path], Any] | None = None,
 ) -> AsyncIterator[Ambiente]:
     from temporalio.contrib.opentelemetry import TracingInterceptor
 
@@ -219,8 +227,9 @@ async def amb(
         intervalo_heartbeat_s=0.2,
         publicador=PublicadorGitHub(cliente_gh, IdempotenciaRedis(redis), dry_run=False),
         metricas=metricas,
+        harness=montar_harness(tmp_path) if montar_harness else None,
     )
-    gateway = TemporalEntregaGateway(client)
+    gateway = TemporalEntregaGateway(client, harness=montar_harness is not None)
     app = criar_app(
         DependenciasWebhook(
             ConfigWebhook(SEGREDO, 1_000_000),
