@@ -1,0 +1,14 @@
+{
+  "versao_metricas": 1,
+  "embedder": "falso-hash-64",
+  "pipeline": "chunker-1+falso-hash-64+contexto-estrutural-1",
+  "corpus_sha": "e9bcdbab1ca6539bdc28d409af144509ababf2e25e5415c689cdb1b33d738e15",
+  "perguntas": 16,
+  "metricas": {
+    "recall@1": 0.625,
+    "recall@3": 0.6875,
+    "recall@5": 0.8125,
+    "mrr": 0.6875
+  },
+  "aviso": "Embeddings falsos (hash de termos) e corpus inventado: valida o pipeline e detecta regressao de chunking, fusao e isolamento. Nao diz nada sobre a qualidade de um modelo real."
+}

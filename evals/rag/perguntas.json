@@ -1,0 +1,21 @@
+{
+  "versao": 1,
+  "perguntas": [
+    {"pergunta": "onde se calcula o valor do frete pelo peso e pela distancia", "caminho": "armazem/frete.py", "simbolo": "calcular_frete"},
+    {"pergunta": "como saber se o pedido tem entrega gratuita", "caminho": "armazem/frete.py", "simbolo": "frete_gratis"},
+    {"pergunta": "estimativa de dias uteis para a transportadora entregar", "caminho": "armazem/frete.py", "simbolo": "estimar_prazo_em_dias"},
+    {"pergunta": "dar baixa de unidades no estoque quando o saldo nao cobre", "caminho": "armazem/estoque.py", "simbolo": "Estoque.retirar"},
+    {"pergunta": "receber unidades de um fornecedor e somar ao estoque", "caminho": "armazem/estoque.py", "simbolo": "Estoque.adicionar"},
+    {"pergunta": "listar produtos que precisam de reposicao urgente", "caminho": "armazem/estoque.py", "simbolo": "produtos_abaixo_do_minimo"},
+    {"pergunta": "mensagem avisando cliente que a entrega vai atrasar", "caminho": "armazem/notificacoes.py", "simbolo": "montar_mensagem_de_atraso"},
+    {"pergunta": "escolher entre email sms ou aplicativo conforme preferencia", "caminho": "armazem/notificacoes.py", "simbolo": "escolher_canal"},
+    {"pergunta": "aplicar cupom de desconto no total do pedido", "caminho": "armazem/pagamento.py", "simbolo": "aplicar_desconto_cupom"},
+    {"pergunta": "parcelar pagamento no cartao com arredondamento na ultima parcela", "caminho": "armazem/pagamento.py", "simbolo": "dividir_em_parcelas"},
+    {"pergunta": "devolver dinheiro de pedido cancelado descontando taxa", "caminho": "armazem/pagamento.py", "simbolo": "reembolsar_pedido_cancelado"},
+    {"pergunta": "somar o preco vezes a quantidade dos itens do carrinho", "caminho": "web/carrinho.ts", "simbolo": "somarItensDoCarrinho"},
+    {"pergunta": "esvaziar carrinho de compras", "caminho": "web/carrinho.ts", "simbolo": "CarrinhoDeCompras.esvaziarCarrinho"},
+    {"pergunta": "formatar valor em reais", "caminho": "web/carrinho.ts", "simbolo": "formatarMoeda"},
+    {"pergunta": "por que o frete e cobrado por peso e distancia", "caminho": "docs/adr/0001-frete-por-peso-e-distancia.md", "simbolo": "0001. Frete cobrado por peso e distancia > Decisao"},
+    {"pergunta": "decisao sobre estoque minimo e fila de reposicao", "caminho": "docs/adr/0002-estoque-minimo-e-reposicao.md", "simbolo": "0002. Estoque minimo e reposicao automatica > Decisao"}
+  ]
+}
