@@ -141,6 +141,11 @@ class GitHubCliente:
         sha = str(comparacao.get("commits", [{}])[-1].get("sha", ""))
         return DiffDaEntrega(tuple(arquivos), sha)
 
+    async def branch_padrao(self, repositorio: str) -> str:
+        return str(
+            (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
+        )
+
     async def politica(self, repositorio: str) -> Politica:
         padrao = (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
         texto = await self.ler_arquivo(repositorio, padrao, ".forja/policy.yaml")

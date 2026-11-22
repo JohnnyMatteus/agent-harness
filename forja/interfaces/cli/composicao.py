@@ -21,6 +21,7 @@ from forja.application.casos_de_uso.harness import (
 from forja.application.casos_de_uso.memoria_do_repositorio import memorias_separadas
 from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
 from forja.application.casos_de_uso.revisao import RevisarEntrega
+from forja.application.casos_de_uso.skills import CatalogoDeSkills
 from forja.application.portas.sdlc import PesquisaDeConhecimento
 from forja.domain.revisao import REVISORES
 from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
@@ -47,6 +48,7 @@ from forja.infrastructure.agents.sdlc import (
     PlanejadorAgente,
     carregar_prompt,
 )
+from forja.infrastructure.agents.skills_fontes import SkillsDoRepositorio, SkillsPadrao
 from forja.infrastructure.github.app_auth import GitHubAppAuth
 from forja.infrastructure.github.chave_privada import carregar_chave_privada
 from forja.infrastructure.github.cliente import GitHubCliente
@@ -195,6 +197,7 @@ def montar_harness(
         memoria_executor,
         ajustes.modelo,
         ao_bloquear=lambda ferramenta, _: metricas.bloqueios.labels(ferramenta).inc(),
+        catalogo=montar_catalogo_de_skills(github),
     )
     avaliador = AvaliadorNaMessagesApi(
         AsyncAnthropic(),
@@ -244,6 +247,12 @@ def montar_revisao(
         for nome in REVISORES
     ]
     return RevisarEntrega(revisores, github)
+
+
+def montar_catalogo_de_skills(github: GitHubCliente) -> CatalogoDeSkills:
+    return CatalogoDeSkills(
+        SkillsPadrao(), SkillsDoRepositorio(github.ler_arquivo, github.branch_padrao)
+    )
 
 
 def montar_worker(

@@ -15,6 +15,7 @@ from claude_agent_sdk import (
     HookContext,
     HookMatcher,
     McpSdkServerConfig,
+    McpServerConfig,
     create_sdk_mcp_server,
     tool,
 )
@@ -27,7 +28,8 @@ from forja.domain.guardrails import (
     PoliticaDeSessao,
     decidir_ferramenta,
 )
-from forja.domain.seguranca import redigir_segredos
+from forja.domain.seguranca import dado_nao_confiavel, redigir_segredos
+from forja.domain.skills import SkillInvalida
 from forja.infrastructure.agents.agent_sdk import LANCADOR
 from forja.infrastructure.sandbox.docker import nome_container
 
@@ -110,6 +112,27 @@ def servidor_memoria(memoria: MemoriaDoRepositorio) -> McpSdkServerConfig:
     return create_sdk_mcp_server("memoria", tools=[ferramenta])
 
 
+def tratador_skills(carregar: Callable[[str], Awaitable[str]]) -> Handler:
+    """Divulgação progressiva: o corpo da skill só entra no contexto quando o agente pede, e o
+    nome tem de estar no catálogo (nunca vira caminho)."""
+
+    async def executar(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            corpo = await carregar(str(args.get("nome", "")))
+        except SkillInvalida as erro:
+            return _texto(f"Erro: {erro}", True)
+        return _texto(f"<skill>{dado_nao_confiavel(corpo)}</skill>", False)
+
+    return executar
+
+
+def servidor_skills(carregar: Callable[[str], Awaitable[str]]) -> McpSdkServerConfig:
+    ferramenta = tool(
+        "skill", "Carrega o corpo de uma skill do catálogo pelo nome.", {"nome": str}
+    )(tratador_skills(carregar))
+    return create_sdk_mcp_server("skills", tools=[ferramenta])
+
+
 def _texto(texto: str, erro: bool) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": redigir_segredos(texto)}], "is_error": erro}
 
@@ -123,19 +146,24 @@ def opcoes_com_ferramentas(
     max_turnos: int,
     modelo: str | None = None,
     ao_bloquear: Bloqueio | None = None,
+    carregar_skill: Callable[[str], Awaitable[str]] | None = None,
 ) -> ClaudeAgentOptions:
     """O CLI roda no container do sandbox; no host só há um diretório vazio e o lançador."""
     permitidas = [*FERRAMENTAS_NATIVAS, FERRAMENTA_EXEC, FERRAMENTA_MEMORIA]
+    servidores: dict[str, McpServerConfig] = {
+        "sandbox": servidor_exec(sandbox, politica),
+        "memoria": servidor_memoria(memoria),
+    }
+    if carregar_skill is not None:
+        servidores["skills"] = servidor_skills(carregar_skill)
+        permitidas.append("mcp__skills__skill")
     return ClaudeAgentOptions(
         system_prompt=system_prompt,
         tools=list(FERRAMENTAS_NATIVAS),
         allowed_tools=permitidas,
         disallowed_tools=["Bash", "WebFetch", "WebSearch", "NotebookEdit", "Task"],
         setting_sources=[],
-        mcp_servers={
-            "sandbox": servidor_exec(sandbox, politica),
-            "memoria": servidor_memoria(memoria),
-        },
+        mcp_servers=servidores,
         strict_mcp_config=True,
         hooks={
             "PreToolUse": [

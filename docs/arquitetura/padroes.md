@@ -59,3 +59,4 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Fan-out / fan-in | `RevisarEntrega` | Revisores independentes em paralelo; falha de um derruba a revisão |
 | Anti-corruption layer na escrita | `PublicadorGitHub` (check run, PR pronto, merge) | Dry-run, idempotência e neutralização num só ponto |
 | Confirmação do efeito | `marcar_pr_pronto` (GraphQL `errors`), `mesclar_pr` (`merged: true`) | HTTP 200 não é sucesso |
+| Divulgação progressiva | `CatalogoDeSkills`, ferramenta `skill` | Tokens fixos mínimos; corpo sob demanda |
