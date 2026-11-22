@@ -31,7 +31,8 @@ class UsoModelo:
 @dataclass(frozen=True)
 class PedidoAgente:
     texto_nao_confiavel: str
-    diretorio_trabalho: Path
+    # Só agentes com ferramenta usam o diretório (dentro do sandbox); o eco não toca em arquivo.
+    diretorio_trabalho: Path | None = None
     limites: LimitesSessao = LimitesSessao()
 
 

@@ -28,6 +28,9 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
+[project.scripts]
+forja = "forja.interfaces.cli.main:main"
+
 [dependency-groups]
 dev = [
     "cryptography>=43",

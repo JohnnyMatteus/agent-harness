@@ -22,6 +22,7 @@ from forja.infrastructure.temporal.workflows import (
 )
 
 FILA_PADRAO = "forja-delivery"
+LIMITE_CORPO = 8000
 
 
 def criar_worker(
@@ -36,7 +37,7 @@ def criar_worker(
         client,
         task_queue=task_queue,
         workflows=[DeliveryWorkflow],
-        activities=[ativ.executar_etapa],
+        activities=[ativ.executar_etapa, ativ.publicar_comentario, ativ.registrar_desfecho],
         interceptors=list(interceptors),
         max_cached_workflows=max_cached_workflows,
     )
@@ -80,7 +81,12 @@ class TemporalEntregaGateway:
 
     async def iniciar(self, comando: CriarIntent) -> ResultadoInicio:
         entrada = DeliveryEntrada(
-            intent_id=self._id(comando.origem, comando.titulo), prazo_lembrete_s=self._prazo
+            intent_id=self._id(comando.origem, comando.titulo),
+            prazo_lembrete_s=self._prazo,
+            repositorio=comando.origem.repositorio,
+            numero=comando.origem.numero,
+            titulo=comando.titulo[:300],
+            corpo=comando.corpo[:LIMITE_CORPO],
         )
         _, novo = await iniciar_ou_sinalizar(self._client, entrada, self._fila)
         return "iniciada" if novo else "ja_existia"

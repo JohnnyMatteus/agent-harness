@@ -6,9 +6,12 @@ Só este módulo importa `claude_agent_sdk`. Em testes, injeta-se um `ClienteSdk
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Protocol
 
+import claude_agent_sdk
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -30,9 +33,50 @@ class ClienteSdk(Protocol):
     def __call__(self, *, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[Any]: ...
 
 
-# Ferramentas de escrita nunca são concedidas ao agente (texto não confiável, seção 9.4).
-FERRAMENTAS_PERMITIDAS: list[str] = []
-FERRAMENTAS_NEGADAS = ["Write", "Edit", "Bash", "NotebookEdit", "WebFetch"]
+# Redundância: `tools=[]` já remove todas as ferramentas nativas do CLI (`--tools ""`).
+FERRAMENTAS_NEGADAS = ["Write", "Edit", "Bash", "NotebookEdit", "WebFetch", "Read", "Grep", "Glob"]
+LANCADOR = Path(__file__).with_name("lancador_cli.py")
+
+
+def cli_real() -> Path:
+    return Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+
+
+def opcoes_sem_ferramentas(
+    system_prompt: str,
+    cwd: Path,
+    home: Path,
+    max_turnos: int,
+    modelo: str | None = None,
+    lancador: Path = LANCADOR,
+    cli: Path | None = None,
+) -> ClaudeAgentOptions:
+    """Agente sem ferramenta nenhuma, para texto não confiável (seção 9.4).
+
+    - `tools=[]`: nenhuma ferramenta nativa (Read, Grep e Glob também somem);
+    - `setting_sources=[]`: nem `.claude/settings.json`, nem CLAUDE.md, nem skills de usuário
+      ou de repositório; `mcp_servers={}` + `strict_mcp_config`: nenhum MCP, nem `.mcp.json`;
+    - `cwd` é um diretório vazio e descartável, nunca um repositório;
+    - o ambiente do processo é recomposto pelo lançador (allowlist), sem segredo do worker.
+    """
+    return ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        tools=[],
+        allowed_tools=[],
+        disallowed_tools=FERRAMENTAS_NEGADAS,
+        setting_sources=[],
+        mcp_servers={},
+        strict_mcp_config=True,
+        cwd=str(cwd),
+        max_turns=max_turnos,
+        model=modelo,
+        cli_path=str(lancador),
+        env={
+            "FORJA_AGENTE_MODO": "host",
+            "FORJA_CLAUDE_CLI_REAL": str(cli or cli_real()),
+            "FORJA_AGENTE_HOME": str(home),
+        },
+    )
 
 
 class AgentSdkRunner:
@@ -50,14 +94,19 @@ class AgentSdkRunner:
             raise LimiteExcedidoError(f"timeout de {pedido.limites.timeout_s}s excedido") from None
 
     async def _rodar(self, pedido: PedidoAgente) -> RespostaDoAgente:
-        options = ClaudeAgentOptions(
-            system_prompt=self._system,
-            cwd=str(pedido.diretorio_trabalho),
-            max_turns=pedido.limites.max_turnos,
-            allowed_tools=FERRAMENTAS_PERMITIDAS,
-            disallowed_tools=FERRAMENTAS_NEGADAS,
-            model=self._modelo,
-        )
+        # cwd e HOME descartáveis: o texto do pedido é a única entrada do agente.
+        with tempfile.TemporaryDirectory(prefix="forja-agente-") as raiz:
+            cwd, home = Path(raiz) / "cwd", Path(raiz) / "home"
+            cwd.mkdir()
+            home.mkdir()
+            options = opcoes_sem_ferramentas(
+                self._system, cwd, home, pedido.limites.max_turnos, self._modelo
+            )
+            return await self._conversar(pedido, options)
+
+    async def _conversar(
+        self, pedido: PedidoAgente, options: ClaudeAgentOptions
+    ) -> RespostaDoAgente:
         prompt = f"<pedido_nao_confiavel>\n{pedido.texto_nao_confiavel}\n</pedido_nao_confiavel>"
         textos: list[str] = []
         try:

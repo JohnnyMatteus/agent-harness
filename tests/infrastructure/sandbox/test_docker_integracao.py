@@ -73,3 +73,23 @@ async def test_ciclo_sem_root_e_arquivos_restritos(repo: Path, tmp_path: Path):
     finally:
         await sb.destruir("it1")
     assert not ativo.worktree.exists()
+
+
+async def test_agente_nao_alcanca_a_api_do_github(repo: Path, tmp_path: Path):
+    """Só o workflow escreve no GitHub (ADR 0007): do sandbox, api.github.com é recusado."""
+    sb = DockerSandbox(GerenciadorWorktree(tmp_path / "wt"))
+    ativo = await sb.criar(EspecSandbox("it2", str(repo)))
+    try:
+        res = await ativo.executar(
+            [
+                "python",
+                "-c",
+                "import urllib.request as u,urllib.error as e,sys\n"
+                "try: u.urlopen('http://api.github.com',timeout=10)\n"
+                "except e.HTTPError as x: sys.exit(0 if x.code == 403 else 2)\n"
+                "sys.exit(3)",
+            ]
+        )
+        assert res.codigo_saida == 0, res.stderr
+    finally:
+        await sb.destruir("it2")

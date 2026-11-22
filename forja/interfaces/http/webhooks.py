@@ -11,6 +11,8 @@ from forja.application.casos_de_uso.ativar_entrega import AtivarEntrega
 from forja.application.portas.deduplicacao import RegistroEntregas
 from forja.infrastructure.github.assinatura import assinatura_valida
 from forja.infrastructure.github.tradutores import traduzir
+from forja.infrastructure.telemetry.metricas import MetricasForja
+from forja.infrastructure.telemetry.otel import tracer
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class DependenciasWebhook:
     config: ConfigWebhook
     registro: RegistroEntregas
     ativar: AtivarEntrega
+    metricas: MetricasForja | None = None
 
 
 def dependencias(request: Request) -> DependenciasWebhook:
@@ -68,12 +71,17 @@ async def receber_webhook(
     if not await deps.registro.registrar_nova(x_github_delivery):
         return {"status": "duplicada"}
     try:
-        resultado = await deps.ativar.executar(traduzir(x_github_event, payload))
+        with tracer().start_as_current_span("gateway.webhook") as span:
+            span.set_attribute("forja.evento", x_github_event[:40])
+            resultado = await deps.ativar.executar(traduzir(x_github_event, payload))
+            span.set_attribute("forja.resultado", resultado)
     except Exception:
         # Libera o id para o reenvio do GitHub não ser descartado como duplicata.
         await deps.registro.esquecer(x_github_delivery)
         log.exception("falha ao processar webhook", extra={"entrega": x_github_delivery})
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "falha ao processar") from None
+    if resultado == "iniciada" and deps.metricas is not None:
+        deps.metricas.iniciadas.inc()
     return {"status": resultado}
 
 

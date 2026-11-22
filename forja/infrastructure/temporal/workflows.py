@@ -18,7 +18,7 @@ from temporalio.exceptions import ApplicationError
 with workflow.unsafe.imports_passed_through():
     from forja.domain.entrega import Entrega
     from forja.domain.estados import Estado, RaioDeImpacto
-    from forja.infrastructure.temporal.activities import EtapaEntrada, EtapaSaida
+    from forja.infrastructure.temporal.activities import EtapaEntrada, EtapaSaida, PublicarEntrada
 
 
 class Desfecho(StrEnum):
@@ -33,6 +33,11 @@ class DeliveryEntrada:
     prazo_lembrete_s: float = 48 * 3600
     timeout_etapa_s: float = 3600
     heartbeat_s: float = 30
+    # Origem da intenção. Titulo e corpo são texto não confiável (dado, nunca instrução).
+    repositorio: str = ""
+    numero: int = 0
+    titulo: str = ""
+    corpo: str = ""
 
 
 @dataclass
@@ -88,8 +93,13 @@ class DeliveryWorkflow:
         try:
             await workflow.wait([corpo, parada], return_when=asyncio.FIRST_COMPLETED)
             if corpo.done() and not self._parar:
-                corpo.result()
+                try:
+                    corpo.result()
+                except BaseException:
+                    await self._desfecho("erro")
+                    raise
                 desfecho = Desfecho.CONCLUIDA
+                await self._desfecho("concluida")
             else:
                 corpo.cancel()
                 await asyncio.gather(corpo, return_exceptions=True)
@@ -112,20 +122,58 @@ class DeliveryWorkflow:
 
     async def _percorrer(self, entrada: DeliveryEntrada) -> None:
         entrega = self._entrega = Entrega(intent_id=entrada.intent_id)
+        await self._etapa_plan(entrada)
         await self._aguardar_confirmacao(entrada)
         entrega.confirmar_intent()
         while entrega.estado is not Estado.MAINTAIN:
-            saida: EtapaSaida = await workflow.execute_activity(
-                "executar_etapa",
-                EtapaEntrada(intent_id=entrada.intent_id, etapa=entrega.estado.value),
-                result_type=EtapaSaida,
-                start_to_close_timeout=timedelta(seconds=entrada.timeout_etapa_s),
-                heartbeat_timeout=timedelta(seconds=entrada.heartbeat_s),
-                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-            self._executadas.append(saida.etapa)
+            await self._executar(entrada, entrega.estado.value)
             self._avancar(entrega)
+
+    async def _executar(self, entrada: DeliveryEntrada, etapa: str) -> EtapaSaida:
+        saida: EtapaSaida = await workflow.execute_activity(
+            "executar_etapa",
+            EtapaEntrada(
+                intent_id=entrada.intent_id,
+                etapa=etapa,
+                repositorio=entrada.repositorio,
+                numero=entrada.numero,
+                titulo=entrada.titulo,
+                corpo=entrada.corpo,
+            ),
+            result_type=EtapaSaida,
+            start_to_close_timeout=timedelta(seconds=entrada.timeout_etapa_s),
+            heartbeat_timeout=timedelta(seconds=entrada.heartbeat_s),
+            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        self._executadas.append(saida.etapa)
+        return saida
+
+    async def _publicar(self, entrada: DeliveryEntrada, corpo: str, chave: str) -> None:
+        """Só o workflow escreve no GitHub (ADR 0007); a activity é idempotente pela chave."""
+        await workflow.execute_activity(
+            "publicar_comentario",
+            PublicarEntrada(
+                entrada.repositorio, entrada.numero, corpo, f"{entrada.intent_id}:{chave}"
+            ),
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )
+
+    async def _desfecho(self, desfecho: str) -> None:
+        await workflow.execute_activity(
+            "registrar_desfecho",
+            desfecho,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
+    async def _etapa_plan(self, entrada: DeliveryEntrada) -> None:
+        """No M1 a etapa Plan é o agente eco: roda no sandbox e o workflow publica a resposta."""
+        saida = await self._executar(entrada, Estado.PLAN.value)
+        if saida.texto and entrada.repositorio:
+            await self._publicar(entrada, f"**Forja (eco)**\n\n{saida.texto}", "plan")
 
     @staticmethod
     def _avancar(entrega: Entrega) -> None:

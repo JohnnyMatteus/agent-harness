@@ -32,6 +32,11 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0053](0053-avaliacao-do-rag-com-embeddings-falsos-no-ci.md) | local | Avaliação do RAG no CI com corpus inventado e embeddings falsos, métricas versionadas | M2 (knowledge) |
 | [0054](0054-indice-postgres-pgvector-e-busca-textual.md) | local | Índice Postgres: pgvector HNSW com varredura iterativa e busca textual por tsvector | M2 (knowledge) |
 
+| [0033](0033-binario-e-raiz-de-composicao.md) | local | Binário `forja` (serve e worker), raiz de composição única, eco como etapa Plan do M1 | M1 |
+| [0034](0034-escrita-externa-dry-run-e-idempotencia.md) | local | Escrita externa em dry-run por padrão e idempotência atômica por chave | M1 em diante |
+| [0035](0035-ativacao-so-em-repositorios-habilitados.md) | local | Ativação só em repositórios habilitados, nome validado na entrada | M1 em diante |
+| [0036](0036-isolamento-do-agent-sdk.md) | local | Isolamento do Agent SDK: sem ferramenta no host; com ferramenta, dentro do sandbox | M1 em diante |
+
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 
 Onde o design doc não registra alternativas, o ADR diz isso explicitamente em vez de inventar; o autor completa antes de aceitar.

@@ -8,7 +8,7 @@ Harness autônomo de engenharia com RAG: a infraestrutura em volta do modelo que
 
 Em times com agentes de código, o gargalo deixou de ser escrever código e passou a ser planejar, revisar e entregar. Sem estrutura, o agente perde contexto entre sessões, ninguém sabe por que uma mudança foi feita e não há como limitar o que ele pode fazer sozinho. A Forja transforma uma issue em uma entrega rastreável: cada etapa produz um artefato versionado (`intent.md`, `spec.md`, `plan.md`, `review.md`), humanos decidem onde o risco exige, e a cadeia de commits serve de auditoria.
 
-## Estado atual (M1, fundação)
+## Estado atual (M1 fechado)
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
@@ -19,6 +19,8 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | Ambiente local: Postgres+pgvector, Redis, Temporal dev server, Phoenix | |
 | `DeliveryWorkflow` no Temporal (teste com test server), agente eco e telemetria | |
 | Sandbox Docker efêmero (sem root, `--read-only`, rede interna, proxy Squid em allowlist), ADR 0032 | |
+| Binário `forja serve` e `forja worker` (ADR 0033): webhook verificado, `DeliveryWorkflow`, agente eco sem ferramenta e com ambiente isolado (ADR 0036), comentário publicado só pelo workflow (dry-run por padrão, ADR 0034), trace único e `/metrics` | |
+| Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); o isolamento do SDK tem teste do comando e do ambiente efetivos | |
 
 RAG, política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 
@@ -136,7 +138,7 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 ## Próximos passos
 
-- M1 restante: trace ponta a ponta e teste de integração completo (o do sandbox roda no CI via `infra/sandbox/preparar.sh`).
+- Agentes com ferramenta (M3/M4) rodam o CLI dentro do sandbox (modo `docker` do lançador, ADR 0036): a imagem com o CLI e o modo ainda não foram exercitados contra Docker real.
 - Aprovação humana com rejeição (hoje não há aresta no diagrama).
 - Política de risco e hooks (M5) e evals contínuos (M8).
 - Knowledge (M2) pendente: adaptador de embedding real (hoje só o falso, e só por escolha explícita), reranker, prefixo de contexto gerado por modelo (ADR 0013), `similar_incidents` e `related_prs`, indexação disparada por webhook, fidelidade e latência p95 no eval.
