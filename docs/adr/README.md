@@ -26,6 +26,7 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0030](0030-id-deterministico-da-intent.md) | local | Id determinístico da Intent: SHA-256 de tipo, repositório e identificador | M1 (domínio) |
 | [0031](0031-limite-de-ciclos-build-test-configuravel.md) | local | Limite de ciclos Test/Build configurável, padrão 3 | M1 (domínio) |
 | [0032](0032-sandbox-fusao-0008-0016.md) | local | Sandbox: fusão proposta dos ADRs 0008 e 0016 (substituiria o 0016 ao aceitar) | M1 (sandbox) |
+| [0046](0046-eficiencia-de-ferramentas-medicao-e-regra-para-tool-search.md) | local | Eficiência de ferramentas: medição de tokens e regra para ligar o tool search (não ligado) | M7 |
 | [0050](0050-indexacao-incremental-por-sha-e-ingestao-nao-confiavel.md) | local | Indexação idempotente e incremental por SHA; conteúdo indexado é não confiável | M2 (knowledge) |
 | [0051](0051-recuperacao-hibrida-isolada-por-escopo.md) | local | Recuperação híbrida com RRF, isolada por organização e repositório na consulta | M2 (knowledge) |
 | [0052](0052-mcp-knowledge-escopo-do-token-da-sessao.md) | local | MCP knowledge: escopo vem do token da sessão, nunca de argumento do modelo | M2 (knowledge) |
