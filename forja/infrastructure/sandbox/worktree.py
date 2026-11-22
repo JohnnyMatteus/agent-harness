@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
@@ -16,10 +18,26 @@ class GitRunner(Protocol):
     async def __call__(self, *args: str, cwd: Path | None = None) -> str: ...
 
 
+_HOME_VAZIO = Path(tempfile.mkdtemp(prefix="forja-wt-home-"))
+
+
+def ambiente_minimo() -> dict[str, str]:
+    """O git do worker não herda segredo nem configuração global (o clone é do operador, mas o
+    processo carrega o ambiente do worker inteiro)."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(_HOME_VAZIO),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 async def git_real(*args: str, cwd: Path | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+        "git", *args, cwd=cwd, env=ambiente_minimo(),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )  # fmt: skip
     out, err = await proc.communicate()
     if proc.returncode != 0:
         raise SandboxError(f"git {args[0]} falhou: {err.decode().strip()}")

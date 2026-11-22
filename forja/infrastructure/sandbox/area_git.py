@@ -14,8 +14,10 @@ Quem chama deve ter parado o container (todos os processos) antes de usar a áre
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -54,16 +56,46 @@ def verificar_ponteiro(worktree: Path, ponteiro: str) -> None:
         raise SandboxError("ponteiro .git do worktree foi alterado")
 
 
+def _recusar_erro(erro: OSError) -> None:
+    """`os.walk` engole erro de listagem por padrão; numa árvore hostil isso esconde o que não
+    pôde ser lido (um `chmod 300` basta). Aqui a falha é a resposta."""
+    raise SandboxError(f"diretório ilegível no worktree: {getattr(erro, 'filename', '?')}")
+
+
 def varrer_git_aninhado(worktree: Path) -> list[Path]:
     """`.git` em qualquer subdiretório (repositório falso, gitlink): o git do host não pode
-    descer neles. Não segue links simbólicos."""
+    descer neles. Não segue links simbólicos e falha se algum diretório não puder ser lido."""
     achados: list[Path] = []
-    for pasta, dirs, arquivos in os.walk(worktree, followlinks=False):
+    for pasta, dirs, arquivos in os.walk(worktree, followlinks=False, onerror=_recusar_erro):
         relativo = Path(pasta).relative_to(worktree)
         for nome in [*dirs, *arquivos]:
             if nome.lower() == ".git" and relativo != Path("."):
                 achados.append(Path(pasta) / nome)
     return achados
+
+
+def _ilegiveis(worktree: Path) -> list[str]:
+    achados: list[str] = []
+    for _ in os.walk(
+        worktree, followlinks=False, onerror=lambda e: achados.append(str(e.filename))
+    ):
+        pass
+    return achados
+
+
+def reabrir_permissoes(worktree: Path) -> None:
+    """Só no descarte: devolve leitura aos diretórios que o agente fechou, para poder limpá-los."""
+    for _ in range(MAX_PASSADAS_DE_PERMISSAO):
+        ilegiveis = _ilegiveis(worktree)
+        if not ilegiveis:
+            return
+        for caminho in ilegiveis:
+            with contextlib.suppress(OSError):
+                os.chmod(caminho, 0o700)
+    raise SandboxError("não foi possível reabrir as permissões do worktree")
+
+
+MAX_PASSADAS_DE_PERMISSAO = 20
 
 
 async def git(
@@ -98,7 +130,8 @@ async def git(
 def _abrir_sem_seguir(
     worktree: Path, relativo: str, flags: int, *, criar_diretorios: bool = False
 ) -> int:
-    """Abre `relativo` dentro do worktree sem seguir link simbólico em NENHUM componente."""
+    """Abre `relativo` dentro do worktree sem seguir link simbólico em NENHUM componente, sem
+    bloquear (um FIFO no lugar do arquivo travaria o worker) e só se for arquivo regular."""
     partes = relativo.split("/")
     fd = os.open(worktree, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -112,7 +145,11 @@ def _abrir_sem_seguir(
                 novo = os.open(parte, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = novo
-        return os.open(partes[-1], flags | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        arquivo = os.open(partes[-1], flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644, dir_fd=fd)
+        if not stat.S_ISREG(os.fstat(arquivo).st_mode):  # fifo, socket, dispositivo, diretório
+            os.close(arquivo)
+            raise OSError("não é arquivo regular")
+        return arquivo
     finally:
         os.close(fd)
 
@@ -125,7 +162,9 @@ class AreaGit:
         except FileNotFoundError:
             return None
         except OSError:
-            raise SandboxError(f"{caminho}: link simbólico no caminho") from None
+            raise SandboxError(
+                f"{caminho}: link simbólico no caminho ou não é arquivo regular"
+            ) from None
         with os.fdopen(fd, "rb") as f:
             if os.fstat(f.fileno()).st_size > TETO_DE_ARQUIVO:
                 raise SandboxError(f"{caminho} acima do teto de tamanho")
@@ -135,11 +174,14 @@ class AreaGit:
         relativo = caminho_relativo_seguro(caminho)
         try:
             fd = _abrir_sem_seguir(
-                worktree, relativo, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, criar_diretorios=True
+                worktree, relativo, os.O_WRONLY | os.O_CREAT, criar_diretorios=True
             )
         except OSError:
-            raise SandboxError(f"{caminho}: link simbólico no caminho de escrita") from None
+            raise SandboxError(
+                f"{caminho}: link, fifo ou destino que não é arquivo regular"
+            ) from None
         with os.fdopen(fd, "w") as f:
+            f.truncate(0)  # só depois de confirmar que é arquivo regular
             f.write(conteudo)
 
     async def head(self, worktree: Path) -> str:
@@ -148,14 +190,25 @@ class AreaGit:
     async def garantir_branch(self, worktree: Path, branch: str) -> None:
         await git(worktree, "checkout", "-q", "-B", branch)
 
+    async def _recusar_gitlink(self, worktree: Path, raiz: str) -> None:
+        """Gitlink (modo 160000) na árvore de `raiz`: lido dos objetos, sem depender de listar o
+        worktree (que o agente pode ter deixado ilegível)."""
+        arvore = await git(worktree, "ls-tree", "-r", "-z", raiz)
+        for entrada in arvore.decode(errors="replace").split("\0"):
+            if entrada.startswith("160000 "):
+                raise SandboxError(
+                    f"gitlink (submódulo) não suportado: {entrada.split(chr(9))[-1]}"
+                )
+
     async def mudancas(self, worktree: Path, base: str) -> list[MudancaDeArquivo]:
+        await self._recusar_gitlink(worktree, base)
         aninhados = varrer_git_aninhado(worktree)
         if aninhados:
             raise SandboxError(f"repositório git aninhado: {aninhados[0].relative_to(worktree)}")
         await git(worktree, "add", "-A")
         bruto = await git(
             worktree, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-ext-diff",
-            "--no-textconv", base,
+            "--no-textconv", "--ignore-submodules=all", base,
         )  # fmt: skip
         campos = bruto.decode(errors="replace").split("\0")
         mudancas: list[MudancaDeArquivo] = []
@@ -180,6 +233,7 @@ class AreaGit:
 
     async def descartar(self, worktree: Path, base: str) -> None:
         self._restaurar_ponteiro(worktree)
+        reabrir_permissoes(worktree)
         for aninhado in varrer_git_aninhado(worktree):  # remove o que o git não deve percorrer
             if aninhado.is_dir() and not aninhado.is_symlink():
                 shutil.rmtree(aninhado, ignore_errors=True)
@@ -189,11 +243,12 @@ class AreaGit:
         await git(worktree, "clean", "-ffdxq")
 
     async def commitar(self, worktree: Path, mensagem: str) -> str | None:
+        await self._recusar_gitlink(worktree, "HEAD")
         aninhados = varrer_git_aninhado(worktree)
         if aninhados:
             raise SandboxError(f"repositório git aninhado: {aninhados[0].relative_to(worktree)}")
         await git(worktree, "add", "-A")
-        if not (await git(worktree, "status", "--porcelain")).strip():
+        if not (await git(worktree, "status", "--porcelain", "--ignore-submodules=all")).strip():
             return None
         await git(worktree, "commit", "-q", "--no-verify", "-F", "-", entrada=mensagem.encode())
         return await self.head(worktree)
@@ -210,7 +265,7 @@ class AreaGit:
         raiz = worktree.resolve()
         testes: set[str] = set()
         links: set[str] = set()
-        for pasta, dirs, arquivos in os.walk(worktree, followlinks=False):
+        for pasta, dirs, arquivos in os.walk(worktree, followlinks=False, onerror=_recusar_erro):
             dirs[:] = [d for d in dirs if not (d == ".git" and Path(pasta) == worktree)]
             for nome in [*dirs, *arquivos]:
                 caminho = Path(pasta) / nome

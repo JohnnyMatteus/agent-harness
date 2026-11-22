@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -128,9 +129,9 @@ async def test_link_em_diretorio_intermediario_nao_e_seguido_na_leitura_nem_na_e
     area = AreaGit()
     with pytest.raises(SandboxError, match="link simbólico"):
         await area.ler(repo, "dir/segredo.md")
-    with pytest.raises(SandboxError, match="link simbólico"):
+    with pytest.raises(SandboxError, match="link"):
         await area.escrever(repo, "dir/novo.md", "x")
-    with pytest.raises(SandboxError, match="link simbólico"):
+    with pytest.raises(SandboxError, match="link"):
         await area.escrever(repo, "dir/sub/novo.md", "x")
     assert sorted(p.name for p in fora.iterdir()) == ["segredo.md"]
     os.symlink("src/a.py", repo / "atalho.md")  # link no último componente
@@ -260,3 +261,100 @@ async def test_dry_run_nao_toca_o_remoto_e_token_nunca_vai_em_argumento(repo: Pa
 
 def test_limpeza_do_tmp_do_teste() -> None:
     assert shutil.which("git")
+
+
+def _rodar_isolado(codigo: str, prazo_s: float = 15.0) -> subprocess.CompletedProcess[str]:
+    """O FIFO trava `os.open` dentro do event loop: só um processo com prazo prova que não trava."""
+    return subprocess.run(
+        [sys.executable, "-c", codigo], capture_output=True, text=True, timeout=prazo_s
+    )
+
+
+def _tenta(chamada: str) -> str:
+    return (
+        f"try:\n    asyncio.run({chamada})\nexcept SandboxError:\n"
+        "    print('recusou'); sys.exit(0)\nsys.exit(3)\n"
+    )
+
+
+@pytest.mark.parametrize("alvo", ["progress.md", "init.sh", "feature_list.json"])
+async def test_fifo_no_lugar_do_arquivo_nao_trava_o_worker_na_leitura_nem_na_escrita(
+    repo: Path, alvo: str
+) -> None:
+    os.mkfifo(repo / alvo)
+    cabecalho = (
+        "import asyncio, sys\nfrom pathlib import Path\n"
+        "from forja.application.portas.sandbox import SandboxError\n"
+        "from forja.infrastructure.sandbox.area_git import AreaGit\n"
+        f"wt = Path({str(repo)!r})\n"
+    )
+    ler = cabecalho + _tenta(f"AreaGit().ler(wt, {alvo!r})")
+    escrever = cabecalho + _tenta(f"AreaGit().escrever(wt, {alvo!r}, 'x')")
+    for codigo in (ler, escrever):
+        r = _rodar_isolado(codigo)
+        assert r.returncode == 0 and "recusou" in r.stdout, r.stderr
+
+
+async def test_fifo_no_lugar_do_ponteiro_git_e_recusado_sem_travar(repo: Path) -> None:
+    (repo / ".git").unlink()
+    os.mkfifo(repo / ".git")
+    codigo = (
+        "import asyncio, sys\nfrom pathlib import Path\n"
+        "from forja.application.portas.sandbox import SandboxError\n"
+        "from forja.infrastructure.sandbox.area_git import AreaGit\n"
+        f"try:\n    asyncio.run(AreaGit().head(Path({str(repo)!r})))\n"
+        "except SandboxError:\n    print('recusou'); sys.exit(0)\nsys.exit(3)\n"
+    )
+    r = _rodar_isolado(codigo)
+    assert r.returncode == 0 and "recusou" in r.stdout, r.stderr
+
+
+async def test_diretorio_ilegivel_nao_esconde_git_aninhado(repo: Path, tmp_path: Path) -> None:
+    sub = repo / "sub"
+    sh("git", "init", "-q", str(sub), cwd=tmp_path)
+    (sub / "a.py").write_text("x")
+    os.chmod(sub, 0o300)  # escrita e travessia, sem listagem: o os.walk comum não vê sub/.git
+    try:
+        area = AreaGit()
+        base = await area.head(repo)
+        with pytest.raises(SandboxError, match=r"ilegível|aninhado"):
+            await area.mudancas(repo, base)
+        with pytest.raises(SandboxError, match=r"ilegível|aninhado"):
+            await area.commitar(repo, "m")
+        await area.descartar(repo, base)  # devolve as permissões e remove o repositório aninhado
+        assert not sub.exists()
+    finally:
+        if sub.exists():
+            os.chmod(sub, 0o700)
+
+
+async def test_gitlink_que_ja_estava_na_base_e_recusado_pelo_indice(
+    origem: Path, tmp_path: Path
+) -> None:
+    sha = sh("git", "rev-parse", "HEAD", cwd=origem).strip()
+    sh("git", "update-index", "--add", "--cacheinfo", f"160000,{sha},sub", cwd=origem)
+    sh("git", "commit", "-q", "-m", "gitlink", cwd=origem)
+    wt = await GerenciadorWorktree(tmp_path / "wt3").criar("s3", origem)
+    area = AreaGit()
+    base = await area.head(wt)
+    os.chmod(wt / "sub", 0o300) if (wt / "sub").exists() else None
+    try:
+        with pytest.raises(SandboxError, match="gitlink"):
+            await area.mudancas(wt, base)
+        with pytest.raises(SandboxError, match="gitlink"):
+            await area.commitar(wt, "m")
+    finally:
+        if (wt / "sub").exists():
+            os.chmod(wt / "sub", 0o700)
+
+
+async def test_git_do_gerenciador_de_worktree_nao_herda_o_ambiente_do_worker(
+    origem: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forja.infrastructure.sandbox.worktree import git_real
+
+    monkeypatch.setenv("FORJA_SEGREDO_DO_WORKER", "valor-secreto")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(origem / "nao-deveria-valer"))
+    saida = await git_real("-c", "alias.despejo=!env", "despejo", cwd=origem)
+    assert "valor-secreto" not in saida and "FORJA_SEGREDO_DO_WORKER" not in saida
+    assert "GIT_CONFIG_GLOBAL=/dev/null" in saida
