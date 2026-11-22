@@ -25,7 +25,7 @@ DIR_CONTAINER = "/workspace"
 USUARIO_PADRAO = "10001:10001"
 
 
-def usuario_efetivo(cfg: "ConfigDocker") -> str:
+def usuario_efetivo(cfg: ConfigDocker) -> str:
     """Usuário sem root do container. O worktree pertence ao processo; o container precisa
     escrever nele sem relaxar permissão (um runner Linux tem uid 1001, não 10001)."""
     if cfg.usuario:
