@@ -1,4 +1,4 @@
-# 0020. Limite de ciclos Test/Build configurável, padrão 3
+# 0031. Limite de ciclos Test/Build configurável, padrão 3
 
 - **Status:** Proposto
 - **Data:** 2026-11-21

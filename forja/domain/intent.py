@@ -9,7 +9,7 @@ from forja.domain.eventos import EventoDeDominio, IntentConfirmada, IntentRecebi
 
 
 class TipoDeOrigem(StrEnum):
-    ISSUE_GITHUB = "issue-github"
+    ISSUE_GITHUB = "github"
     CLI = "cli"
     BANDA = "banda"
 
@@ -46,7 +46,7 @@ class Origem:
 
 
 def intent_id_de(origem: Origem) -> str:
-    """Id determinístico: 16 hex do SHA-256 da chave da origem (ADR 0019).
+    """Id determinístico: 16 hex do SHA-256 da chave da origem (ADR 0030).
 
     Serve de nome de branch, pasta `.forja/<id>/` e id do workflow ("um workflow por intenção").
     """

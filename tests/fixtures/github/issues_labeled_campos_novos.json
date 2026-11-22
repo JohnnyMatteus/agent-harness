@@ -1,0 +1,53 @@
+{
+  "action": "labeled",
+  "issue": {
+    "id": 100,
+    "number": 42,
+    "title": "Corrigir login",
+    "body": "O login falha com senha longa.",
+    "state": "open",
+    "html_url": "https://github.com/acme-demo/loja-exemplo/issues/42",
+    "user": {
+      "login": "maria-dev",
+      "id": 10,
+      "type": "User",
+      "site_admin": false
+    },
+    "labels": [
+      {
+        "id": 5,
+        "name": "forja:intent"
+      }
+    ],
+    "campo_futuro": {
+      "a": 1
+    }
+  },
+  "label": {
+    "id": 5,
+    "name": "forja:intent",
+    "novo": true
+  },
+  "repository": {
+    "id": 1,
+    "name": "loja-exemplo",
+    "full_name": "acme-demo/loja-exemplo",
+    "private": true,
+    "default_branch": "main",
+    "owner": {
+      "login": "acme-demo",
+      "id": 2,
+      "type": "Organization"
+    },
+    "outro": [
+      1
+    ]
+  },
+  "sender": {
+    "login": "maria-dev",
+    "id": 10,
+    "type": "User",
+    "site_admin": false
+  },
+  "extra_de_versao_nova": "x"
+}

@@ -1,0 +1,22 @@
+name: Feature
+description: Proposta de funcionalidade
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema
+      description: Quem precisa do quê e por quê.
+    validations:
+      required: true
+  - type: textarea
+    id: criterios
+    attributes:
+      label: Critérios de aceite (Gherkin)
+      render: gherkin
+    validations:
+      required: true
+  - type: input
+    id: adr
+    attributes:
+      label: ADR relacionado

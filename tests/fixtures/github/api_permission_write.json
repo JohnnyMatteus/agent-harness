@@ -1,0 +1,9 @@
+{
+  "permission": "write",
+  "user": {
+    "login": "maria-dev",
+    "id": 10,
+    "type": "User",
+    "site_admin": false
+  }
+}
