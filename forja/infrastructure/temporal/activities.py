@@ -15,6 +15,7 @@ from forja.application.portas.agente import UsoModelo
 from forja.application.portas.harness import ContextoDaEntrega, Harness
 from forja.application.portas.publicador import DestinoDaEntrega, PublicadorDeEntrega
 from forja.application.portas.revisao import EscritaDeRevisao, LeituraDeRevisao
+from forja.domain.artefatos import caminho_do_artefato
 from forja.domain.politica import Tier
 from forja.domain.revisao import REVISORES, Achado, Severidade
 from forja.infrastructure.github.cliente import nome_da_branch
@@ -115,10 +116,20 @@ class RevisaoEntrada:
     artefatos: dict[str, str] = field(default_factory=dict[str, str])
     labels: list[str] = field(default_factory=list[str])
     numero: int = 0
+    sha: str = ""  # SHA pós-review, fixado: checks e merge valem só para ele
+
+
+@dataclass(frozen=True)
+class FixarEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    sha_revisado: str
 
 
 @dataclass(frozen=True)
 class RevisaoSaida:
+    sha: str = ""  # SHA da ponta que foi revisada
     tier: int = 3
     motivos: list[str] = field(default_factory=list[str])
     achados: list[AchadoDto] = field(default_factory=list[AchadoDto])
@@ -134,7 +145,7 @@ class DeployEntrada:
     repositorio: str
     intent_id: str
     slug: str
-    branch_pronta: bool = False
+    sha: str = ""  # SHA fixado depois da revisão
 
 
 @dataclass(frozen=True)
@@ -242,9 +253,8 @@ class DeliveryActivities:
 
     @activity.defn(name="carregar_politica")
     async def carregar_politica(self, repositorio: str) -> PoliticaDto:
-        if self._leitura is None:
-            return PoliticaDto()
-        p = await self._leitura.politica(repositorio)
+        # Sem leitura não há política para aplicar: ilimitado seria falhar aberto.
+        p = await self._leit().politica(repositorio)
         o = p.orcamento
         return PoliticaDto(o.por_intent_usd or 0.0, o.max_sessoes_por_intent or 0, p.declarada)
 
@@ -260,12 +270,14 @@ class DeliveryActivities:
                 e.artefatos.get("spec.md", ""),
                 e.labels,
                 politica,
+                e.intent_id,
             ),
             "revisar",
         )
         self._medir_uso(feita.uso)
         r = feita.resultado
         return RevisaoSaida(
+            sha=feita.diff.head_sha,
             tier=int(r.tier),
             motivos=list(r.classificacao.motivos),
             achados=[
@@ -285,13 +297,23 @@ class DeliveryActivities:
             custo_usd=feita.uso.custo_usd,
         )
 
+    @activity.defn(name="fixar_sha")
+    async def fixar_sha(self, e: FixarEntrada) -> str:
+        """SHA pós-review: a ponta atual da branch, se o único avanço desde o SHA revisado foi o
+        commit do review.md feito pela Forja. Qualquer outra coisa (alguém empurrou código) devolve
+        vazio: a revisão não vale mais para o que está na branch."""
+        branch = nome_da_branch(e.intent_id, e.slug)
+        ponta = await self._leit().head_da_branch(e.repositorio, branch)
+        avanco = await self._leit().avanco(e.repositorio, e.sha_revisado, ponta)
+        review = caminho_do_artefato(e.intent_id, "review.md")
+        return ponta if avanco.so_o_review(review) else ""
+
     @activity.defn(name="publicar_checks")
     async def publicar_checks(self, e: RevisaoEntrada, achados: list[AchadoDto]) -> str:
         """Um check run por revisor, no commit atual da branch (depois do review.md)."""
         self._revisao()
-        diff = await self._leit().diff_da_entrega(
-            e.repositorio, nome_da_branch(e.intent_id, e.slug)
-        )
+        if not e.sha:
+            raise ApplicationError("SHA pós-review ausente", non_retryable=True)
         concluidos: list[str] = []
         for nome in REVISORES:
             dos_dele = tuple(
@@ -309,7 +331,7 @@ class DeliveryActivities:
             concluidos.append(
                 await self._escr().check_run(
                     e.repositorio,
-                    diff.head_sha,
+                    e.sha,
                     nome,
                     dos_dele,
                     f"{len(dos_dele)} achado(s)",
@@ -320,13 +342,20 @@ class DeliveryActivities:
 
     @activity.defn(name="estado_dos_checks")
     async def estado_dos_checks(self, e: DeployEntrada) -> str:
-        diff = await self._leit().diff_da_entrega(
+        if not e.sha:
+            raise ApplicationError("SHA pós-review ausente", non_retryable=True)
+        return await self._leit().estado_dos_checks(e.repositorio, e.sha)
+
+    async def _branch_andou(self, e: DeployEntrada) -> bool:
+        ponta = await self._leit().head_da_branch(
             e.repositorio, nome_da_branch(e.intent_id, e.slug)
         )
-        return await self._leit().estado_dos_checks(e.repositorio, diff.head_sha)
+        return ponta != e.sha
 
     @activity.defn(name="marcar_pronto")
     async def marcar_pronto(self, e: DeployEntrada) -> str:
+        if not e.sha or await self._branch_andou(e):
+            return "andou"  # a aprovação humana vale só para o SHA revisado
         numero = await self._leit().numero_do_pr(e.repositorio, nome_da_branch(e.intent_id, e.slug))
         if numero is None:
             return "sem_pr"
@@ -334,13 +363,18 @@ class DeliveryActivities:
 
     @activity.defn(name="mesclar")
     async def mesclar(self, e: DeployEntrada) -> str:
+        """Merge do SHA revisado, e só dele: se a branch andou ou os checks deixaram de ser
+        verdes, não mescla (o GitHub também recusa um merge cujo `sha` não é a ponta)."""
+        if not e.sha or await self._branch_andou(e):
+            return "andou"
+        if await self._leit().estado_dos_checks(e.repositorio, e.sha) != "verde":
+            return "checks_mudaram"
         branch = nome_da_branch(e.intent_id, e.slug)
         numero = await self._leit().numero_do_pr(e.repositorio, branch)
         if numero is None:
             return "sem_pr"
-        diff = await self._leit().diff_da_entrega(e.repositorio, branch)
         await self._escr().marcar_pr_pronto(e.repositorio, numero, e.intent_id)
-        return await self._escr().mesclar_pr(e.repositorio, numero, diff.head_sha, e.intent_id)
+        return await self._escr().mesclar_pr(e.repositorio, numero, e.sha, e.intent_id)
 
     @activity.defn(name="registrar_desfecho")
     async def registrar_desfecho(self, desfecho: str) -> None:

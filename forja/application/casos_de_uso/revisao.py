@@ -14,6 +14,7 @@ from forja.domain.revisao import (
     Achado,
     DiffDaEntrega,
     ResultadoDaRevisao,
+    elevar_por_diff_incompleto,
     renderizar_review,
     tier_com_achados,
 )
@@ -41,6 +42,7 @@ class RevisarEntrega:
         spec_md: str,
         labels: Sequence[str],
         politica: Politica,
+        intent_id: str | None = None,
     ) -> RevisaoFeita:
         diff = await self._leitura.diff_da_entrega(repositorio, branch)
         # Em paralelo e independentes: um revisor que falha derruba a revisão (não há "aprovado
@@ -50,7 +52,8 @@ class RevisarEntrega:
         )
         por_revisor = {r.nome: f.achados for r, f in zip(self._revisores, feitas, strict=True)}
         achados = tuple(a for f in feitas for a in f.achados)
-        base = politica.classificar(diff.caminhos, labels, diff.linhas_alteradas)
+        base = politica.classificar(diff.caminhos, labels, diff.linhas_alteradas, intent_id)
+        base = elevar_por_diff_incompleto(base, diff)
         resultado = ResultadoDaRevisao(achados, tier_com_achados(base, achados))
         resumos = {r.nome: f.resumo for r, f in zip(self._revisores, feitas, strict=True)}
         uso = UsoModelo()

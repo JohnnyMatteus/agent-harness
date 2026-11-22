@@ -12,6 +12,13 @@
 - **Orçamento:** `per_intent_usd` e `max_sessions_per_intent` do `policy.yaml` são checados antes de cada bloco e da revisão; estourar interrompe a entrega para um humano. `per_night_usd` é do NightlyWorkflow (fora do escopo até hoje).
 - **Custo do Avaliador:** exige preço configurado, senão o orçamento mentiria (ADR 0041).
 
+## Fixação do SHA e checks (falha fechada)
+
+- A ponta da branch é lida da ref (o compare só devolve até 250 commits) e o diff é calculado por esse SHA. O SHA revisado é guardado; o único avanço aceito depois dele é o commit do `review.md` feito pela própria Forja (o compare revisado...atual deve ter zero commits ou um commit que só toca `.forja/<id>/review.md`). Esse SHA pós-review é fixado em `publicar_checks`, `estado_dos_checks` e `mesclar`; se a branch andou por outro motivo, a entrega falha para um humano. A aprovação humana vale só para esse SHA: se a branch andar entre o pedido e o clique, o PR não é marcado pronto. A chave de idempotência do merge inclui o SHA, e a activity de merge reconfere a ponta e os checks no momento.
+- Check "verde" só com tudo concluído em `success`, `neutral` ou `skipped` (`startup_failure`, `stale` e conclusões desconhecidas falham), lendo todas as páginas (`total_count` maior que o lido é pendente) e os commit statuses, e com ao menos um check externo (nome fora de `forja/`) ou status em sucesso: os check runs da própria Forja não provam nada sobre o CI do repositório. Sem check externo, não há auto-merge: a entrega vai para o portão humano.
+- Diff incompleto: lista de arquivos no teto do compare é risco alto; patch truncado (8 000 caracteres por arquivo), arquivo com linhas alteradas e sem patch, ou diff acima de 60 000 caracteres no prompt marcam a revisão como incompleta: no mínimo médio, logo nunca auto-merge, com o motivo no review.md.
+- `carregar_politica` sem leitura configurada falha (não retentável) em vez de assumir orçamento ilimitado.
+
 ## Limitações
 
 - Auto-merge nunca rodou contra o GitHub real; os testes usam GitHub falso. CODEOWNERS e branch protection são respeitados só porque o merge falha se o GitHub recusar.

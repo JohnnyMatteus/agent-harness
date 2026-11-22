@@ -183,7 +183,6 @@ class ClienteDeRevisaoGravador:
         self.merges.append((numero, sha))
 
 
-
 def _publicador_de_revisao(dry_run=False):
     cliente = ClienteDeRevisaoGravador()
     pub = PublicadorGitHub(

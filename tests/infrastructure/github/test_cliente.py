@@ -1,3 +1,4 @@
+# pyright: basic
 from collections.abc import Callable
 from typing import Any
 
@@ -122,7 +123,153 @@ async def test_leitura_de_arquivo_distingue_ausencia_erro_e_tamanho_absurdo() ->
             assert await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md") == "oi"
 
 
-async def test_diff_politica_checks_pr_pronto_e_merge_do_cliente() -> None:
+SHA = "c" * 40
+REF = f"/repos/{REPO}/git/ref/heads/forja/x"
+
+
+def _arq(nome, **extra):
+    return {"filename": nome, "status": "modified", "additions": 1, "deletions": 0, **extra}
+
+
+async def _com_github(rotas):
+    http = httpx.AsyncClient(base_url="https://api.github.com")
+    mock = respx.mock(base_url="https://api.github.com", assert_all_called=False)
+    mock.start()
+    mock.get(f"/repos/{REPO}").respond(200, json={"default_branch": "main"})
+    for rota, resposta in rotas.items():
+        mock.get(rota).respond(200, json=resposta)
+    return GitHubCliente(AuthFalso(), http), mock, http
+
+
+async def _fim(mock, http):
+    mock.stop()
+    await http.aclose()
+
+
+async def test_diff_vem_da_ref_da_branch_e_nao_do_ultimo_commit_do_compare() -> None:
+    cliente, mock, http = await _com_github(
+        {
+            REF: {"object": {"sha": SHA}},
+            f"/repos/{REPO}/compare/main...{SHA}": {
+                "files": [_arq("src/a.py", patch="+x" * 9000)],
+                "commits": [{"sha": "1" * 40}],  # o compare só devolve até 250 commits
+                "total_commits": 400,
+            },
+        }
+    )
+    try:
+        d = await cliente.diff_da_entrega(REPO, "forja/x")
+        assert d.head_sha == SHA and d.caminhos == ("src/a.py",) and not d.cortado
+        assert len(d.arquivos[0].patch) <= 8000  # patch limitado
+    finally:
+        await _fim(mock, http)
+
+
+async def test_compare_no_teto_de_300_arquivos_e_diff_cortado_e_rename_traz_a_origem() -> None:
+    from forja.domain.politica import Politica, Tier
+    from forja.domain.revisao import elevar_por_diff_incompleto
+
+    arquivos = [_arq(f"docs/{i}.md") for i in range(299)] + [
+        _arq("docs/main.tf", status="renamed", previous_filename="infra/main.tf")
+    ]
+    cliente, mock, http = await _com_github(
+        {
+            REF: {"object": {"sha": SHA}},
+            f"/repos/{REPO}/compare/main...{SHA}": {"files": arquivos, "commits": []},
+        }
+    )
+    try:
+        d = await cliente.diff_da_entrega(REPO, "forja/x")
+        assert d.cortado and "infra/main.tf" in d.caminhos  # o rename também mexeu em infra/
+        p = Politica.de_dict(
+            {"risk_tiers": {"high": {"paths": ["infra/**"]}, "low": {"paths": ["docs/**"]}}}
+        )
+        c = elevar_por_diff_incompleto(p.classificar(d.caminhos, [], 5), d)
+        assert c.tier is Tier.ALTO and any("incompleto" in m for m in c.motivos)
+    finally:
+        await _fim(mock, http)
+
+
+async def test_avanco_entre_dois_shas() -> None:
+    a, b = "1" * 40, "2" * 40
+    cliente, mock, http = await _com_github(
+        {
+            f"/repos/{REPO}/compare/{a}...{b}": {
+                "total_commits": 1,
+                "files": [{"filename": ".forja/x/review.md"}],
+            }
+        }
+    )
+    try:
+        av = await cliente.avanco(REPO, a, b)
+        assert av.so_o_review(".forja/x/review.md") and not av.so_o_review(".forja/y/review.md")
+        assert (await cliente.avanco(REPO, a, a)).so_o_review("qualquer")  # nada mudou
+    finally:
+        await _fim(mock, http)
+
+
+def _runs(*conclusoes, nome="ci/build", status="completed"):
+    return [{"name": nome, "status": status, "conclusion": c} for c in conclusoes]
+
+
+@pytest.mark.parametrize(
+    ("runs", "statuses", "esperado"),
+    [
+        (_runs("success"), [], "verde"),
+        (_runs("success", "neutral", "skipped"), [], "verde"),
+        (_runs("startup_failure"), [], "falhou"),
+        (_runs("stale"), [], "falhou"),
+        (_runs("failure"), [], "falhou"),
+        (_runs("success") + _runs("algo_novo"), [], "falhou"),  # fora da allowlist não é verde
+        (_runs(None, status="in_progress"), [], "pendente"),
+        (_runs("success", nome="forja/seguranca"), [], "sem_externos"),  # só a própria Forja
+        (_runs("success", nome="forja/seguranca"), [{"state": "success"}], "verde"),
+        ([], [], "sem_externos"),
+        (_runs("success"), [{"state": "pending"}], "pendente"),
+        (_runs("success"), [{"state": "failure"}], "falhou"),
+        (_runs("success"), [{"state": "error"}], "falhou"),
+    ],
+)
+async def test_checks_so_sao_verdes_pela_allowlist_com_check_externo_e_statuses(
+    runs, statuses, esperado
+) -> None:
+    cliente, mock, http = await _com_github(
+        {
+            f"/repos/{REPO}/commits/{SHA}/check-runs": {
+                "total_count": len(runs),
+                "check_runs": runs,
+            },
+            f"/repos/{REPO}/commits/{SHA}/status": {"statuses": statuses},
+        }
+    )
+    try:
+        assert await cliente.estado_dos_checks(REPO, SHA) == esperado
+    finally:
+        await _fim(mock, http)
+
+
+async def test_checks_paginam_e_o_que_nao_foi_lido_e_pendente() -> None:
+    cliente, mock, http = await _com_github(
+        {f"/repos/{REPO}/commits/{SHA}/status": {"statuses": []}}
+    )
+    try:
+        rota = mock.get(f"/repos/{REPO}/commits/{SHA}/check-runs", params={"page": "1"})
+        pagina1 = {"total_count": 140, "check_runs": _runs(*["success"] * 100, nome="forja/x")}
+        rota.respond(200, json=pagina1)
+        # a página 2 devolve vazio: 100 lidos de 140 é "não vi tudo"
+        mock.get(f"/repos/{REPO}/commits/{SHA}/check-runs", params={"page": "2"}).respond(
+            200, json={"total_count": 140, "check_runs": []}
+        )
+        assert await cliente.estado_dos_checks(REPO, SHA) == "pendente"
+        mock.get(f"/repos/{REPO}/commits/{SHA}/check-runs", params={"page": "2"}).respond(
+            200, json={"total_count": 140, "check_runs": _runs(*["success"] * 40)}
+        )
+        assert await cliente.estado_dos_checks(REPO, SHA) == "verde"  # leu as duas páginas
+    finally:
+        await _fim(mock, http)
+
+
+async def test_politica_pr_pronto_e_merge_do_cliente() -> None:
     import base64
 
     from forja.domain.politica import Tier
@@ -132,64 +279,16 @@ async def test_diff_politica_checks_pr_pronto_e_merge_do_cliente() -> None:
         c = GitHubCliente(AuthFalso(), http)
         with respx.mock(base_url="https://api.github.com") as mock:
             mock.get(f"/repos/{REPO}").respond(200, json={"default_branch": "main"})
-            mock.get(f"/repos/{REPO}/compare/main...forja/x").respond(
-                200,
-                json={
-                    "files": [
-                        {
-                            "filename": "src/a.py",
-                            "status": "added",
-                            "additions": 5,
-                            "deletions": 1,
-                            "patch": "+x" * 9000,
-                        }
-                    ],
-                    "commits": [{"sha": "c" * 40}],
-                },
-            )
-            d = await c.diff_da_entrega(REPO, "forja/x")
-            assert (
-                d.caminhos == ("src/a.py",) and d.linhas_alteradas == 6 and d.head_sha == "c" * 40
-            )
-            assert len(d.arquivos[0].patch) <= 8000  # patch limitado
-
             politica = mock.get(f"/repos/{REPO}/contents/.forja/policy.yaml")
             ok = 'risk_tiers:\n  low:\n    paths: ["docs/**"]\n'
-            politica.respond(
-                200,
-                json={"content": base64.b64encode(ok.encode()).decode(), "sha": "s", "size": 40},
-            )
+            conteudo = base64.b64encode(ok.encode()).decode()
+            politica.respond(200, json={"content": conteudo, "sha": "s", "size": 40})
             assert (await c.politica(REPO)).classificar(["docs/a.md"], [], 1).tier is Tier.BAIXO
             politica.respond(404)
             assert not (await c.politica(REPO)).declarada  # ausente: fechada
-            ruim = "risk_tiers: {low: 1}"  # fora do subconjunto: fechada, nunca aberta
-            politica.respond(
-                200,
-                json={"content": base64.b64encode(ruim.encode()).decode(), "sha": "s", "size": 10},
-            )
+            ruim = base64.b64encode(b"risk_tiers: {low: 1}").decode()  # fora do subconjunto
+            politica.respond(200, json={"content": ruim, "sha": "s", "size": 10})
             assert (await c.politica(REPO)).classificar(["docs/a.md"], [], 1).tier is Tier.ALTO
-
-            checks = mock.get(f"/repos/{REPO}/commits/{'c' * 40}/check-runs")
-            checks.respond(200, json={"check_runs": []})
-            assert await c.estado_dos_checks(REPO, "c" * 40) == "pendente"
-            checks.respond(
-                200,
-                json={
-                    "check_runs": [
-                        {"status": "completed", "conclusion": "success"},
-                        {"status": "in_progress", "conclusion": None},
-                    ]
-                },
-            )
-            assert await c.estado_dos_checks(REPO, "c" * 40) == "pendente"
-            checks.respond(
-                200, json={"check_runs": [{"status": "completed", "conclusion": "failure"}]}
-            )
-            assert await c.estado_dos_checks(REPO, "c" * 40) == "falhou"
-            checks.respond(
-                200, json={"check_runs": [{"status": "completed", "conclusion": "neutral"}]}
-            )
-            assert await c.estado_dos_checks(REPO, "c" * 40) == "verde"
 
             mock.get(f"/repos/{REPO}/pulls/7").respond(200, json={"node_id": "N7"})
             gql = mock.post("/graphql")
@@ -202,6 +301,6 @@ async def test_diff_politica_checks_pr_pronto_e_merge_do_cliente() -> None:
             merge = mock.put(f"/repos/{REPO}/pulls/7/merge")
             merge.respond(200, json={"merged": False, "message": "x"})
             with pytest.raises(GitHubApiError):  # só merged:true é merge
-                await c.mesclar_pr(REPO, 7, "c" * 40)
+                await c.mesclar_pr(REPO, 7, SHA)
             merge.respond(200, json={"merged": True})
-            await c.mesclar_pr(REPO, 7, "c" * 40)
+            await c.mesclar_pr(REPO, 7, SHA)

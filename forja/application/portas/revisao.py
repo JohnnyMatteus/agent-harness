@@ -9,9 +9,9 @@ from typing import Any, Literal, Protocol
 
 from forja.application.portas.agente import UsoModelo
 from forja.domain.politica import Politica
-from forja.domain.revisao import Achado, DiffDaEntrega
+from forja.domain.revisao import Achado, AvancoDaBranch, DiffDaEntrega
 
-EstadoDosChecks = Literal["verde", "pendente", "falhou"]
+EstadoDosChecks = Literal["verde", "pendente", "falhou", "sem_externos"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +30,15 @@ class Revisor(Protocol):
 
 
 class LeituraDeRevisao(Protocol):
-    async def diff_da_entrega(self, repositorio: str, branch: str) -> DiffDaEntrega: ...
+    async def head_da_branch(self, repositorio: str, branch: str) -> str:
+        """SHA da ponta da branch, lido da ref."""
+        ...
+
+    async def diff_da_entrega(self, repositorio: str, branch: str) -> DiffDaEntrega:
+        """Diff contra a branch padrão, calculado pelo SHA da ponta (`head_sha`)."""
+        ...
+
+    async def avanco(self, repositorio: str, de_sha: str, para_sha: str) -> AvancoDaBranch: ...
 
     async def politica(self, repositorio: str) -> Politica:
         """`.forja/policy.yaml` da branch PADRÃO (nunca da branch da entrega, que o agente

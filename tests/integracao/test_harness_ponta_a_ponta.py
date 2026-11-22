@@ -203,6 +203,11 @@ async def test_risco_baixo_com_politica_declarada_e_auto_merge_habilitado_mescla
     amb_automerge: Ambiente,
 ) -> None:
     amb = amb_automerge
+    # o CI do repositório (check externo) já passou nesse commit; os checks da Forja não bastam
+    amb.github.check_runs.append(
+        {"name": "ci/build", "head_sha": amb.github.ref_final, "status": "completed",
+         "conclusion": "success"}
+    )  # fmt: skip
     await _ate_o_build(amb, "m1")
     await esperar(lambda: any("PR mesclado" in c for c in amb.comentarios()), 90)
     assert len(amb.github.merges) == 1 and amb.github.merges[0]["sha"] == amb.github.ref_final
@@ -222,3 +227,10 @@ async def test_segredo_no_diff_barra_a_entrega_mesmo_com_o_modelo_dizendo_que_es
     seg = next(c for c in amb.github.check_runs if c["name"] == "forja/seguranca")
     assert seg["conclusion"] == "failure" and seg["output"]["annotations"][0]["path"] == "src/f1.py"
     assert amb.github.merges == [] and amb.github.prontos == []
+
+
+async def test_so_com_os_checks_da_propria_forja_nao_ha_auto_merge(amb_automerge: Ambiente) -> None:
+    amb = amb_automerge  # política baixa e repositório habilitado, mas nenhum check externo
+    await _ate_o_build(amb, "x1")
+    await esperar(lambda: any("Um humano decide" in c for c in amb.comentarios()), 90)
+    assert amb.github.merges == [] and len(amb.github.check_runs) == 4

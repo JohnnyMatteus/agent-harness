@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         DeployEntrada,
         EtapaEntrada,
         EtapaSaida,
+        FixarEntrada,
         HarnessEntrada,
         HarnessSaida,
         PoliticaDto,
@@ -342,10 +343,24 @@ class DeliveryWorkflow:
         self._custo += revisao.custo_usd
         self._artefatos["review.md"] = revisao.review_md
         await self._commitar(entrada, "review.md", "review")
+        # Tudo depois daqui vale para UM SHA: o revisado mais o commit do review.md da própria
+        # Forja. Se a branch andou por outro motivo, a revisão não vale para o que está nela.
+        sha = await workflow.execute_activity(
+            "fixar_sha",
+            FixarEntrada(entrada.repositorio, entrada.intent_id, entrada.slug, revisao.sha),
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
+        )
+        if not sha:
+            return await self._falhar(
+                entrada,
+                "a branch mudou depois da revisão; refaça a entrega para revisar o que está nela",
+            )
         await workflow.execute_activity(
             "publicar_checks",
             args=[
-                RevisaoEntrada(entrada.repositorio, entrada.intent_id, entrada.slug),
+                RevisaoEntrada(entrada.repositorio, entrada.intent_id, entrada.slug, sha=sha),
                 revisao.achados,
             ],
             result_type=str,
@@ -358,13 +373,19 @@ class DeliveryWorkflow:
             entrega.concluir_review(achados_bloqueantes=True, raio=RaioDeImpacto.ALTO)
             lista = "; ".join(f"{a.revisor}: {a.mensagem[:120]}" for a in bloqueantes[:5])
             return await self._falhar(entrada, f"achados bloqueantes da revisão: {lista}")
+        deploy = DeployEntrada(entrada.repositorio, entrada.intent_id, entrada.slug, sha)
         pode_automerge = entrada.automerge and tier is Tier.BAIXO
+        if pode_automerge:
+            # Se a Forja não viu um check externo verde, não é auto-merge: vai para um humano.
+            estado = await self._esperar_checks(entrada, deploy)
+            if estado == "falhou":
+                return await self._falhar(entrada, "checks do PR falharam")
+            pode_automerge = estado == "verde"
         entrega.concluir_review(
             achados_bloqueantes=False,
             raio=RaioDeImpacto.BAIXO if tier is Tier.BAIXO else RaioDeImpacto.ALTO,
             politica_permite_deploy=pode_automerge,
         )
-        deploy = DeployEntrada(entrada.repositorio, entrada.intent_id, entrada.slug)
         if entrega.estado is Estado.DEPLOY:
             return await self._auto_merge(entrada, entrega, deploy)
         motivos = "; ".join(revisao.motivos) or "sem motivos de elevação"
@@ -372,54 +393,69 @@ class DeliveryWorkflow:
         await self._comentar(
             entrada,
             "aprovacao",
-            f"Revisão concluída; risco {tier.name.lower()} ({motivos}). Um humano decide: "
-            "`/forja approve` ou `/forja reject <motivo>`.",
+            f"Revisão concluída no commit {sha[:10]}; risco {tier.name.lower()} ({motivos}). Um "
+            "humano decide, e a aprovação vale só para este commit: `/forja approve` ou "
+            "`/forja reject <motivo>`.",
         )
         decisao, quem, motivo = await self._esperar_decisao(entrada, "aprovação humana do PR")
         if decisao == "rejeitada":
             return await self._encerrar_rejeitado(entrada, "pr", quem, motivo)
         entrega.aprovar(quem)  # AguardandoHumano -> Deploy (Approved-By)
-        await workflow.execute_activity(
-            "marcar_pronto", deploy, result_type=str,
+        pronto = await workflow.execute_activity(
+            "marcar_pronto",
+            deploy,
+            result_type=str,
             start_to_close_timeout=timedelta(seconds=120),
             retry_policy=RetryPolicy(maximum_attempts=5),
-        )  # fmt: skip
+        )
+        if pronto == "andou":
+            return await self._falhar(
+                entrada,
+                "a branch mudou depois da aprovação; a aprovação valia só para o SHA revisado",
+            )
         await self._comentar(
             entrada, "aprovada", f"Aprovado por {quem}. PR pronto para revisão: o merge é humano."
         )
         return Desfecho.APROVADA
 
+    async def _esperar_checks(self, entrada: DeliveryEntrada, deploy: DeployEntrada) -> str:
+        """Espera os checks do SHA fixado. Devolve verde, falhou ou sem_externos (também no fim
+        do prazo): só `verde` autoriza o auto-merge."""
+        estado = "pendente"
+        for _ in range(entrada.max_esperas_dos_checks):
+            estado = await workflow.execute_activity(
+                "estado_dos_checks",
+                deploy,
+                result_type=str,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
+            )
+            if estado != "pendente":
+                return estado
+            await workflow.sleep(timedelta(seconds=entrada.espera_dos_checks_s))
+        return "sem_externos"
+
     async def _auto_merge(
         self, entrada: DeliveryEntrada, entrega: Entrega, deploy: DeployEntrada
     ) -> Desfecho:
-        """Auto-merge só com tier baixo, política permitindo, dono habilitando e checks verdes."""
-        for _ in range(entrada.max_esperas_dos_checks):
-            estado = await workflow.execute_activity(
-                "estado_dos_checks", deploy, result_type=str,
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=5),
-            )  # fmt: skip
-            if estado == "verde":
-                resultado = await workflow.execute_activity(
-                    "mesclar",
-                    deploy,
-                    result_type=str,
-                    start_to_close_timeout=timedelta(seconds=180),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3, non_retryable_error_types=NAO_REPETIR
-                    ),
-                )
-                if resultado in ("publicado", "ja_publicado"):
-                    entrega.concluir_deploy()
-                    await self._comentar(
-                        entrada, "mesclada", "Risco baixo e checks verdes: PR mesclado."
-                    )
-                    return Desfecho.MESCLADA
-                return await self._falhar(entrada, f"merge não realizado ({resultado})")
-            if estado == "falhou":
-                return await self._falhar(entrada, "checks do PR falharam")
-            await workflow.sleep(timedelta(seconds=entrada.espera_dos_checks_s))
-        return await self._falhar(entrada, "checks do PR não terminaram a tempo")
+        """Auto-merge do SHA revisado: tier baixo, política permitindo, dono habilitando e checks
+        verdes (externos) já confirmados; a activity reconfere SHA e checks no momento do merge."""
+        resultado = await workflow.execute_activity(
+            "mesclar",
+            deploy,
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=180),
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=NAO_REPETIR),
+        )
+        if resultado in ("publicado", "ja_publicado"):
+            entrega.concluir_deploy()
+            await self._comentar(
+                entrada,
+                "mesclada",
+                f"Risco baixo e checks verdes: PR mesclado ({deploy.sha[:10]}).",
+            )
+            return Desfecho.MESCLADA
+        return await self._falhar(entrada, f"merge não realizado ({resultado}); volta ao humano")
 
     def _harness_entrada(
         self, e: DeliveryEntrada, bloco: int = 0, feedback: str = ""

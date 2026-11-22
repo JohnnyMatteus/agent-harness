@@ -1,5 +1,6 @@
 # pyright: basic
 import asyncio
+import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -23,8 +24,10 @@ REPO: dict[str, Any] = {
 }
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
+@pytest_asyncio.fixture
 async def env():
+    # Um servidor por teste: workflows esquecidos ou um lock de time-skipping desbalanceado num
+    # teste travavam os seguintes.
     async with await WorkflowEnvironment.start_time_skipping() as e:
         yield e
 
@@ -324,8 +327,10 @@ async def _rodar_harness(env, harness, pilha=None, aprovar=None, **extra):
         escrita=escrita,
     )
     entrada = DeliveryEntrada(intent_id=ID, harness=True, **{**REPO, **extra})
-    async with criar_worker(env.client, ativ):
-        h, _ = await iniciar_ou_sinalizar(env.client, entrada)
+    # Fila propria: workflows esquecidos por outros testes nao podem roubar as tasks daqui.
+    fila = f"forja-harness-{uuid.uuid4().hex}"
+    async with criar_worker(env.client, ativ, task_queue=fila):
+        h, _ = await iniciar_ou_sinalizar(env.client, entrada, fila)
         await _confirmar(h)
         if aprovar is not None:
             await _esperar_portao(h, "aprovacao")
@@ -414,11 +419,19 @@ async def test_checks_do_pr_que_falham_ou_nao_terminam_impedem_o_merge(env):
     saida, _, escrita = await _rodar_harness(env, HarnessFalso(), falhou, automerge=True)
     assert saida.desfecho == Desfecho.FALHOU and "falharam" in saida.motivo_da_rejeicao
     pendente = pilha_de_revisao(LeituraFalsa(checks=("pendente",)))
-    saida, _, escrita = await _rodar_harness(
-        env, HarnessFalso(), pendente, automerge=True, max_esperas_dos_checks=2
+    # Sem confirmação a tempo, não há auto-merge: a decisão vai para um humano (aqui, rejeita).
+    saida, pub, escrita = await _rodar_harness(
+        env,
+        HarnessFalso(),
+        pendente,
+        aprovar="reject",
+        automerge=True,
+        max_esperas_dos_checks=2,
+        espera_dos_checks_s=0.05,  # relogio real: o portao e esperado por polling
     )
-    assert saida.desfecho == Desfecho.FALHOU and "a tempo" in saida.motivo_da_rejeicao
-    assert escrita.merges == []
+    assert saida.desfecho == Desfecho.REJEITADA and saida.etapa_final == "aguardando_humano"
+    assert escrita.merges == [] and escrita.prontos == []
+    assert any("Um humano decide" in c[1] for c in pub.comentarios)
 
 
 async def test_orcamento_por_intencao_e_por_sessoes_interrompe_a_entrega(env):
@@ -474,12 +487,19 @@ async def test_harness_desligado_mantem_o_comportamento_do_m3(env):
 
 
 async def test_parar_cancela_o_bloco_em_curso(env):
-    from tests.infrastructure.temporal.fakes import HarnessFalso
+    from tests.infrastructure.temporal.fakes import HarnessFalso, pilha_de_revisao
 
     harness = HarnessFalso(atraso=3600)
     pub = PublicadorFalso()
+    revisor, leitura, escrita = pilha_de_revisao()
     ativ = DeliveryActivities(
-        ExecutorFalso(), publicador=pub, harness=harness, intervalo_heartbeat_s=0.2
+        ExecutorFalso(),
+        publicador=pub,
+        harness=harness,
+        revisor=revisor,
+        leitura=leitura,
+        escrita=escrita,
+        intervalo_heartbeat_s=0.2,
     )
     async with criar_worker(env.client, ativ):
         h, _ = await iniciar_ou_sinalizar(
@@ -493,3 +513,88 @@ async def test_parar_cancela_o_bloco_em_curso(env):
         await asyncio.sleep(1)
         saida = await h.result()
     assert saida.desfecho == Desfecho.CANCELADA and pub.prs == []
+
+
+async def test_branch_que_andou_alem_do_review_invalida_a_revisao_antes_dos_checks(env):
+    from forja.domain.revisao import AvancoDaBranch
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    review = ".forja/0123456789abcdef/review.md"
+    for avanco in (
+        AvancoDaBranch(1, ("src/evil.py",)),
+        AvancoDaBranch(1, (review, "src/evil.py")),
+        AvancoDaBranch(2, (review,)),
+    ):
+        leitura = LeituraFalsa()
+        leitura.avanco_fixo = avanco
+        saida, _, escrita = await _rodar_harness(
+            env, HarnessFalso(), pilha_de_revisao(leitura), automerge=True
+        )
+        assert (
+            saida.desfecho == Desfecho.FALHOU
+            and "mudou depois da revisão" in saida.motivo_da_rejeicao
+        )
+        assert escrita.checks == [] and escrita.merges == [] and escrita.prontos == []
+
+
+async def test_branch_que_anda_entre_a_revisao_e_o_merge_nao_mescla(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    leitura = LeituraFalsa()
+    leitura.pontas = ["b" * 40, "c" * 40]  # a ponta pós-review e, depois, outra
+    saida, _, escrita = await _rodar_harness(
+        env, HarnessFalso(), pilha_de_revisao(leitura), automerge=True
+    )
+    assert saida.desfecho == Desfecho.FALHOU and "andou" in saida.motivo_da_rejeicao
+    assert escrita.merges == [] and escrita.prontos == []
+
+
+async def test_aprovacao_humana_vale_so_para_o_sha_revisado(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    leitura = LeituraFalsa()
+    leitura.pontas = ["b" * 40, "c" * 40]
+    saida, _, escrita = await _rodar_harness(
+        env, HarnessFalso(), pilha_de_revisao(leitura), aprovar="approve", automerge=False
+    )
+    assert (
+        saida.desfecho == Desfecho.FALHOU
+        and "aprovação valia só para o SHA" in saida.motivo_da_rejeicao
+    )
+    assert escrita.prontos == []
+
+
+async def test_sem_check_externo_verde_nao_ha_auto_merge_mesmo_com_tudo_permitindo(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    pilha = pilha_de_revisao(LeituraFalsa(checks=("sem_externos",)))
+    saida, _, escrita = await _rodar_harness(
+        env, HarnessFalso(), pilha, aprovar="approve", automerge=True
+    )
+    assert saida.desfecho == Desfecho.APROVADA and escrita.merges == []
+
+
+async def test_checks_que_deixam_de_ser_verdes_no_momento_do_merge_nao_mesclam(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    pilha = pilha_de_revisao(LeituraFalsa(checks=("verde", "falhou")))
+    saida, _, escrita = await _rodar_harness(env, HarnessFalso(), pilha, automerge=True)
+    assert saida.desfecho == Desfecho.FALHOU and "checks_mudaram" in saida.motivo_da_rejeicao
+    assert escrita.merges == []
+
+
+async def test_harness_sem_leitura_de_politica_falha_em_vez_de_assumir_orcamento_ilimitado(env):
+    from temporalio.client import WorkflowFailureError
+
+    from tests.infrastructure.temporal.fakes import HarnessFalso
+
+    ativ = DeliveryActivities(
+        ExecutorFalso(), publicador=PublicadorFalso(), harness=HarnessFalso(), leitura=None
+    )
+    async with criar_worker(env.client, ativ):
+        h, _ = await iniciar_ou_sinalizar(
+            env.client, DeliveryEntrada(intent_id=ID, harness=True, **REPO)
+        )
+        await _confirmar(h)
+        with pytest.raises(WorkflowFailureError):
+            await h.result()

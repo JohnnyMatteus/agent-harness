@@ -119,6 +119,21 @@ class LeituraFalsa:
             tuple(ArquivoDoDiff(c, "added", 3, 0, "+x") for c in caminhos), "a" * 40
         )
         self.checks = list(checks)
+        # Pontas lidas da ref: a primeira é a pós-review; a lista permite simular "a branch andou".
+        self.pontas = ["b" * 40]
+        self.avanco_fixo = None
+        self.heads_lidos = 0
+
+    async def head_da_branch(self, repositorio, branch):
+        self.heads_lidos += 1
+        return self.pontas.pop(0) if len(self.pontas) > 1 else self.pontas[0]
+
+    async def avanco(self, repositorio, de_sha, para_sha):
+        from forja.domain.revisao import AvancoDaBranch
+
+        if self.avanco_fixo is not None:
+            return self.avanco_fixo
+        return AvancoDaBranch(1, (".forja/0123456789abcdef/review.md",))
 
     async def diff_da_entrega(self, repositorio, branch):
         return self.diff

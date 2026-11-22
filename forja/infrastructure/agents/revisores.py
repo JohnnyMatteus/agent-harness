@@ -10,6 +10,7 @@ from __future__ import annotations
 from forja.application.portas.revisao import RevisaoDeUmRevisor
 from forja.domain.politica import Tier
 from forja.domain.revisao import (
+    TETO_DO_PROMPT,
     Achado,
     DiffDaEntrega,
     Severidade,
@@ -27,7 +28,6 @@ FOCOS = {
     "adrs": "aderência aos ADRs e à arquitetura citados na spec; regra de dependência.",
     "desempenho": "desempenho: consultas, laços, alocações e chamadas externas desnecessárias.",
 }
-TETO_DO_PROMPT = 60_000
 _RISCO = {"baixo": Tier.BAIXO, "medio": Tier.MEDIO, "alto": Tier.ALTO}
 
 

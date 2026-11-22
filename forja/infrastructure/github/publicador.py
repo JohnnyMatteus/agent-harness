@@ -223,5 +223,6 @@ class PublicadorGitHub:
             log.info("dry-run: merge não feito", extra={"repositorio": repositorio, "pr": numero})
             return "dry_run"
         return await self._uma_vez(
-            f"{chave}:merge:{numero}", lambda: self._cliente().mesclar_pr(repositorio, numero, sha)
+            f"{chave}:merge:{numero}:{sha}",
+            lambda: self._cliente().mesclar_pr(repositorio, numero, sha),
         )

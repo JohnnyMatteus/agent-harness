@@ -84,3 +84,38 @@ def test_review_md_traz_risco_revisores_e_achados_sem_abrir_titulo() -> None:
         "## desempenho",
     ]
     assert "**bloqueante** `src/a.py:4`" in md and r.bloqueantes == achados
+
+
+def test_diff_incompleto_eleva_o_tier_e_nunca_fica_baixo() -> None:
+    from forja.domain.politica import Politica
+    from forja.domain.revisao import TETO_DE_PATCH, elevar_por_diff_incompleto
+
+    p = Politica.de_dict({"risk_tiers": {"low": {"paths": ["docs/**"]}}})
+
+    def tier(d: DiffDaEntrega) -> Tier:
+        return elevar_por_diff_incompleto(p.classificar(d.caminhos, [], 5), d).tier
+
+    inteiro = diff(arq("docs/a.md", "+x"))
+    assert tier(inteiro) is Tier.BAIXO
+    # lista cortada pelo compare (ou no teto de 300): alto
+    assert tier(DiffDaEntrega(inteiro.arquivos, "a" * 40, cortado=True)) is Tier.ALTO
+    assert tier(diff(*(arq(f"docs/{i}.md", "+x") for i in range(300)))) is Tier.ALTO
+    # o revisor não viu tudo: no mínimo médio
+    assert tier(diff(arq("docs/a.md", "+" + "x" * TETO_DE_PATCH))) is Tier.MEDIO
+    assert tier(diff(arq("docs/a.md", ""))) is Tier.MEDIO  # linhas alteradas e sem patch
+    assert tier(diff(*(arq(f"docs/{i}.md", "+" + "x" * 5000) for i in range(20)))) is Tier.MEDIO
+
+
+def test_rename_conta_o_caminho_de_origem() -> None:
+    d = diff(ArquivoDoDiff("docs/main.tf", "renamed", 0, 0, "", "infra/main.tf"))
+    assert d.caminhos == ("docs/main.tf", "infra/main.tf")
+
+
+def test_avanco_aceito_e_so_o_commit_do_review() -> None:
+    from forja.domain.revisao import AvancoDaBranch
+
+    r = ".forja/x/review.md"
+    assert AvancoDaBranch(1, (r,)).so_o_review(r) and AvancoDaBranch(0, ()).so_o_review(r)
+    assert not AvancoDaBranch(1, (r, "src/a.py")).so_o_review(r)
+    assert not AvancoDaBranch(2, (r,)).so_o_review(r)
+    assert not AvancoDaBranch(1, ("src/a.py",)).so_o_review(r)

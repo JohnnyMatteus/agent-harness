@@ -57,6 +57,7 @@ def criar_worker(
             ativ.harness_verificar,
             ativ.carregar_politica,
             ativ.revisar,
+            ativ.fixar_sha,
             ativ.publicar_checks,
             ativ.estado_dos_checks,
             ativ.marcar_pronto,

@@ -69,7 +69,8 @@ class GitHubFalso:
 
         @app.get("/repos/{dono}/{nome}/git/ref/heads/{ref:path}")
         async def ref(dono: str, nome: str, ref: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-            return {"object": {"sha": "a" * 40}}
+            # a branch padrão e a da entrega têm SHAs diferentes: a ponta da entrega é ref_final
+            return {"object": {"sha": "a" * 40 if ref == "main" else self.ref_final}}
 
         @app.post("/repos/{dono}/{nome}/git/refs", status_code=201)
         async def criar_ref(dono: str, nome: str, request: Request) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
@@ -118,7 +119,9 @@ class GitHubFalso:
 
         @app.get("/repos/{dono}/{nome}/compare/{spec:path}")
         async def comparar(dono: str, nome: str, spec: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-            return {"files": self.arquivos_do_diff, "commits": [{"sha": self.ref_final}]}
+            if spec.startswith("main..."):
+                return {"files": self.arquivos_do_diff, "commits": [{"sha": "0" * 40}]}
+            return {"total_commits": 0, "files": [], "commits": []}  # avanço entre SHAs iguais
 
         @app.post("/repos/{dono}/{nome}/check-runs", status_code=201)
         async def criar_check(dono: str, nome: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
@@ -128,7 +131,12 @@ class GitHubFalso:
 
         @app.get("/repos/{dono}/{nome}/commits/{sha}/check-runs")
         async def checks(dono: str, nome: str, sha: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-            return {"check_runs": [c for c in self.check_runs if c["head_sha"] == sha]}
+            runs = [c for c in self.check_runs if c["head_sha"] == sha]
+            return {"total_count": len(runs), "check_runs": runs}
+
+        @app.get("/repos/{dono}/{nome}/commits/{sha}/status")
+        async def status(dono: str, nome: str, sha: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            return {"statuses": []}
 
         @app.get("/repos/{dono}/{nome}/pulls/{numero}")
         async def pr(dono: str, nome: str, numero: int) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
