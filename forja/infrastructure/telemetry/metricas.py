@@ -38,5 +38,15 @@ class MetricasForja:
             "forja_tokens_total", "Tokens das sessões", ["direcao"], registry=self.registry
         )
 
+        # Maintain (M6): o que o monitor não conseguiu ver e o que o diagnóstico custou.
+        self.bandas_sem_dados = Counter(
+            "forja_bandas_sem_dados_total",
+            "Verificações de banda sem dado confiável (não é violação nem saudável)",
+            registry=self.registry,
+        )
+        self.diagnosticos = Counter(
+            "forja_diagnosticos_total", "Diagnósticos de incidente pagos", registry=self.registry
+        )
+
     def exportar(self) -> bytes:
         return generate_latest(self.registry)

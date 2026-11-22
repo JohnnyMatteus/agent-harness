@@ -1,11 +1,14 @@
-"""Consulta somente leitura ao Prometheus (`query_range`). A consulta PromQL vem do
-`bands.yaml` do repositório-alvo; ela só é enviada como parâmetro de leitura, com teto de
-pontos, e a resposta é validada: erro do Prometheus nunca vira "tudo bem"."""
+"""Consulta somente leitura ao Prometheus (`query_range`). A consulta PromQL vem da configuração
+do OPERADOR (arquivo de bandas fora do repositório monitorado); ela só é enviada como parâmetro
+de leitura, com teto de pontos, e a resposta é validada: erro do Prometheus nunca vira
+"tudo bem".
+
+Limite conhecido: o Prometheus preenche cada passo com a última amostra dentro do lookback (5 min
+por padrão), então um alvo que parou de reportar parece fresco por até ~5 min. A Forja não
+detecta isso; a consulta do operador deve incluir `up`/`absent` ou `timestamp()` se importar."""
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -39,14 +42,12 @@ def validar_url_do_prometheus(url: str) -> str:
 
 
 class PrometheusHttp:
-    def __init__(self, http: httpx.AsyncClient, relogio: Callable[[], float] = time.time) -> None:
+    def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
-        self._relogio = relogio
 
-    async def serie(self, consulta: str, janela_s: int, passo_s: int) -> list[Amostra]:
+    async def serie(self, consulta: str, janela_s: int, passo_s: int, fim: float) -> list[Amostra]:
         if len(consulta) > MAX_CONSULTA or passo_s < 1 or janela_s // passo_s > MAX_PONTOS:
             raise PrometheusIndisponivel("consulta ou janela acima dos tetos")
-        fim = self._relogio()
         try:
             resposta = await self._http.get(
                 "/api/v1/query_range",

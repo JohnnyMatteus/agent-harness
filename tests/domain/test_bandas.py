@@ -12,6 +12,7 @@ from forja.domain.bandas import (
     EstadoDaBanda,
     avaliar_banda,
     duracao_em_segundos,
+    janela_avaliada,
 )
 from forja.infrastructure.yaml_estrito import ler
 
@@ -118,3 +119,35 @@ def test_violada_so_se_toda_a_janela_passa_do_teto(valores: list[float]) -> None
     s = serie(valores)
     janela = [a.valor for a in s if a.instante >= 1000.0 - 600]
     assert estado(s) is (V if all(v > 0.3 for v in janela) else D)
+
+
+@pytest.mark.parametrize("valor", [float("nan"), float("inf"), float("-inf")])
+def test_max_nao_finito_e_recusado_no_dominio_e_no_arquivo(valor: float) -> None:
+    with pytest.raises(BandasInvalidas, match="finito"):
+        Banda("a", "q", valor, 300)
+    with pytest.raises(BandasInvalidas, match="finito"):
+        Bandas.de_dict(
+            {"service": "s", "bands": [{"id": "a", "query": "q", "max": valor, "for": "5m"}]}
+        )
+
+
+def test_for_de_2m_com_so_60s_acima_nao_viola_e_a_amostra_que_cobre_o_inicio_conta() -> None:
+    dois = Banda("b", "q", 5, 120)
+    s = serie([1, 1, 1, 9, 9], fim=1000.0)  # só os dois últimos (60 s) passam do teto
+    assert avaliar_banda(dois, s, 1000.2, 60)[0] is D  # a que cobre o início (valor 1) conta
+    assert avaliar_banda(dois, serie([9, 9, 1, 9, 9], fim=1000.0), 1000.2, 60)[0] is D
+    assert avaliar_banda(dois, serie([9, 9, 9, 9, 9], fim=1000.0), 1000.2, 60)[0] is V
+    assert [a.valor for a in janela_avaliada(dois, s, 1000.2)] == [1, 9, 9]
+
+
+def test_for_menor_que_o_passo_e_recusado_no_arquivo_e_a_evidencia_so_diz_o_medido() -> None:
+    with pytest.raises(BandasInvalidas, match="mínimo"):
+        Bandas.de_dict(
+            {"service": "s", "bands": [{"id": "a", "query": "q", "max": 1, "for": "30s"}]}
+        )
+    from forja.domain.incidente import Evidencia
+
+    e = Evidencia.da_serie(
+        Banda("b", "q", 5, 120), janela_avaliada(Banda("b", "q", 5, 120), serie([9] * 5), 1000.0)
+    )
+    assert e.amostras == 3 and "pelo menos" not in e.resumo() and "3 amostras" in e.resumo()

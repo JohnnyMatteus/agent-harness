@@ -10,8 +10,9 @@ from forja.domain.incidente import Evidencia, Incidente
 
 
 class ConsultaDeMetricas(Protocol):
-    async def serie(self, consulta: str, janela_s: int, passo_s: int) -> list[Amostra]:
-        """Série de uma consulta PromQL somente leitura (a consulta vem do repositório)."""
+    async def serie(self, consulta: str, janela_s: int, passo_s: int, fim: float) -> list[Amostra]:
+        """Série de uma consulta PromQL somente leitura, terminando em `fim` (o mesmo instante
+        em que o chamador avalia a banda). A consulta vem da configuração do operador."""
         ...
 
 
@@ -35,6 +36,7 @@ class Diagnosticador(Protocol):
 
 class AberturaDeIncidente(Protocol):
     async def abrir(self, repositorio: str, titulo: str, corpo: str, chave: str) -> str:
-        """Abre a issue do incidente (label `forja:incident`) uma vez por `chave`. Devolve a URL
-        ou "dry-run"."""
+        """Abre a issue do incidente (label `forja:incident`) uma vez por `chave` e só se não
+        houver issue de incidente aberta com o mesmo título (se não der para listar, não abre).
+        Devolve a URL, "dry-run" ou o motivo de não ter aberto."""
         ...

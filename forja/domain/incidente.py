@@ -28,6 +28,7 @@ class Evidencia:
 
     @classmethod
     def da_serie(cls, banda: Banda, serie: list[Amostra]) -> Evidencia:
+        """`serie` são as amostras da janela avaliada (ver `janela_avaliada`)."""
         valores = [a.valor for a in serie] or [0.0]
         return cls(
             banda.id, banda.maximo, banda.por_segundos, valores[-1], max(valores), len(serie)
@@ -35,9 +36,9 @@ class Evidencia:
 
     def resumo(self) -> str:
         return (
-            f"banda {self.banda_id}: máximo {self.maximo}, atual {self.atual:.4g}, pico "
-            f"{self.pico:.4g}, acima do máximo por pelo menos {self.por_segundos}s "
-            f"({self.amostras} amostras)"
+            f"banda {self.banda_id}: máximo {self.maximo}; na janela de {self.por_segundos}s "
+            f"todas as {self.amostras} amostras medidas passaram do máximo (atual "
+            f"{self.atual:.4g}, pico {self.pico:.4g})"
         )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Annotated
 
@@ -74,6 +75,13 @@ class Ajustes(BaseSettings):
     def _lista(cls, v: object) -> object:
         if isinstance(v, str):
             return [p.strip() for p in v.split(",") if p.strip()]
+        return v
+
+    @field_validator("monitor_intervalo_s")
+    @classmethod
+    def _intervalo(cls, v: float) -> float:
+        if not math.isfinite(v) or not 30.0 <= v <= 24 * 3600.0:
+            raise ValueError("FORJA_MONITOR_INTERVALO_S deve ser finito e de 30 a 86400")
         return v
 
     @classmethod

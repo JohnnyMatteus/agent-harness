@@ -182,6 +182,11 @@ class ClienteDeRevisaoGravador:
     async def mesclar_pr(self, repositorio, numero, sha):
         self.merges.append((numero, sha))
 
+    async def titulos_de_issues_abertas(self, repositorio, rotulo):
+        if getattr(self, "listagem_falha", False):
+            raise RuntimeError("github fora")
+        return list(getattr(self, "titulos_abertos", []))
+
     async def criar_issue(self, repositorio, titulo, corpo, rotulos):
         self.issues = getattr(self, "issues", [])
         self.issues.append((titulo, corpo, rotulos))
@@ -261,3 +266,21 @@ async def test_incidente_abre_issue_com_label_de_incidente_uma_vez_e_em_dry_run_
     assert await seco.abrir("a/b", "t", "c", "k") == "dry-run" and not hasattr(c2, "issues")
     with pytest.raises(ValueError, match="inválido"):
         await pub.abrir("../x", "t", "c", "k2")
+
+
+async def test_nao_abre_outra_issue_de_incidente_enquanto_houver_uma_aberta_da_mesma_banda() -> (
+    None
+):
+    pub, cliente = _publicador_de_revisao()
+    cliente.titulos_abertos = ["Incidente: banda lat violada"]  # pyright: ignore
+    r = await pub.abrir("a/b", "Incidente: banda lat violada", "corpo", "k-nova")
+    assert r.startswith("nao_aberta") and not hasattr(cliente, "issues")
+    # outra banda, ou a anterior já fechada: abre
+    assert (await pub.abrir("a/b", "Incidente: banda dlq violada", "c", "k2")).startswith("https")
+
+
+async def test_se_nao_consegue_listar_as_issues_abertas_nao_abre() -> None:
+    pub, cliente = _publicador_de_revisao()
+    cliente.listagem_falha = True  # pyright: ignore
+    r = await pub.abrir("a/b", "Incidente: banda lat violada", "corpo", "k1")
+    assert r.startswith("nao_aberta") and not hasattr(cliente, "issues")

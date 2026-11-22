@@ -187,6 +187,22 @@ class GitHubCliente:
             for c in commits
         ]
 
+    async def titulos_de_issues_abertas(self, repositorio: str, rotulo: str) -> list[str]:
+        """Títulos das issues (não PRs) abertas com o rótulo. Levanta se a lista pode estar
+        incompleta: quem decide "não há issue aberta" precisa ter visto todas."""
+        titulos: list[str] = []
+        for pagina in range(1, 4):
+            itens = await self._chamar(
+                "GET",
+                repositorio,
+                f"/repos/{repositorio}/issues?state=open&labels={quote(rotulo)}"
+                f"&per_page=100&page={pagina}",
+            )
+            titulos += [str(i["title"]) for i in itens if "pull_request" not in i]
+            if len(itens) < 100:
+                return titulos
+        raise ValueError("lista de issues abertas acima do teto: não dá para afirmar")
+
     async def criar_issue(
         self, repositorio: str, titulo: str, corpo: str, rotulos: list[str]
     ) -> str:

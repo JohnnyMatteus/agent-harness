@@ -236,13 +236,23 @@ class PublicadorGitHub:
         if self._dry_run:
             log.info("dry-run: issue de incidente não aberta", extra={"chave": chave})
             return "dry-run"
+        titulo_unico = linha_unica(neutralizar_texto(titulo, 150), 150)
+        try:
+            abertas = await self._cliente().titulos_de_issues_abertas(
+                repositorio, ROTULO_DO_INCIDENTE
+            )
+        except Exception:
+            log.warning("incidente não aberto: não foi possível listar as issues abertas")
+            return "nao_aberta (lista de issues indisponivel)"
+        if titulo_unico in abertas:
+            return "nao_aberta (ja ha issue de incidente aberta para a banda)"
         url: list[str] = []
 
         async def abrir() -> None:
             url.append(
                 await self._cliente().criar_issue(
                     repositorio,
-                    linha_unica(neutralizar_texto(titulo, 150), 150),
+                    titulo_unico,
                     neutralizar_texto(corpo, 8000),
                     [ROTULO_DO_INCIDENTE],
                 )

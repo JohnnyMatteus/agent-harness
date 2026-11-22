@@ -112,3 +112,14 @@ def test_monitor_desligado_sem_configuracao_e_falha_fechado_quando_incompleto(
         FORJA_BANDAS_DIR=str(tmp_path),
     )
     assert montar_operacao(ligado, github, pub) is not None
+
+
+@pytest.mark.parametrize("valor", ["nan", "inf", "5", "0", "100000"])
+def test_intervalo_do_monitor_invalido_e_recusado(
+    monkeypatch: pytest.MonkeyPatch, valor: str
+) -> None:
+    monkeypatch.setenv("FORJA_MONITOR_INTERVALO_S", valor)
+    with pytest.raises(ValueError, match="FORJA_MONITOR_INTERVALO_S"):
+        Ajustes.do_ambiente()
+    monkeypatch.setenv("FORJA_MONITOR_INTERVALO_S", "30")
+    assert Ajustes.do_ambiente().monitor_intervalo_s == 30

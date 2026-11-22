@@ -274,6 +274,7 @@ def montar_operacao(
     github: GitHubCliente,
     publicador: PublicadorGitHub,
     cliente: ClienteSdk | None = None,
+    metricas: MetricasForja | None = None,
 ) -> AtividadesDeOperacao | None:
     """Maintain (M6). Desligado sem FORJA_MONITOR_REPOS; ligado, exige URL do Prometheus e o
     diretório de bandas do operador, e só monitora repositório habilitado. A issue do incidente
@@ -297,6 +298,8 @@ def montar_operacao(
         PrometheusHttp(http),
         montar_diagnostico(ajustes, montar_pesquisa(ajustes), cliente),
         publicador,
+        frozenset(ajustes.monitor_repos),
+        telemetria=metricas,
     )
 
 
@@ -324,4 +327,6 @@ def montar_worker(
         leitura=github,
         escrita=publicador,
     )
-    return criar_worker(client, atividades, operacao=montar_operacao(ajustes, github, publicador))
+    return criar_worker(
+        client, atividades, operacao=montar_operacao(ajustes, github, publicador, metricas=metricas)
+    )

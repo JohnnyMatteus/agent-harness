@@ -47,7 +47,11 @@ def criar_worker(
     operacao: AtividadesDeOperacao | None = None,
 ) -> Worker:
     ativ = activities
-    extras = [operacao.checar_bandas, operacao.diagnosticar_e_abrir] if operacao else []
+    extras = (
+        [operacao.checar_bandas, operacao.diagnosticar, operacao.abrir_incidente]
+        if operacao
+        else []
+    )
     return Worker(
         client,
         task_queue=task_queue,
@@ -186,7 +190,10 @@ async def iniciar_monitores(
     from temporalio.common import WorkflowIDConflictPolicy
 
     from forja.domain.seguranca import repositorio_valido
-    from forja.infrastructure.temporal.operacao import MonitorEntrada
+    from forja.infrastructure.temporal.operacao import MonitorEntrada, intervalo_valido
+
+    if intervalo_s != intervalo_valido(intervalo_s):
+        raise ValueError("intervalo do monitor deve ser finito e de 30 s a 24 h")
 
     ids: list[str] = []
     for repo in repositorios:
