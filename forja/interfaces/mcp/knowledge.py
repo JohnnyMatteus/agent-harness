@@ -12,12 +12,12 @@ from typing import Annotated, Any, Literal
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
+from forja.application.casos_de_uso.obter_simbolo import ObterSimbolo
 from forja.application.casos_de_uso.recuperar_conhecimento import (
     CONSULTA_MAXIMA,
     DESLOCAMENTO_MAXIMO,
     RecuperarConhecimento,
 )
-from forja.application.portas.knowledge import IndiceDeTrechos
 from forja.domain.knowledge import Escopo, Filtro, TipoDeTrecho, Trecho
 
 AVISO = (
@@ -52,7 +52,7 @@ def _item(trecho: Trecho, score: float) -> dict[str, Any]:
 
 
 def criar_servidor(
-    recuperador: RecuperarConhecimento, indice: IndiceDeTrechos, escopo: Escopo
+    recuperador: RecuperarConhecimento, obter_simbolo: ObterSimbolo, escopo: Escopo
 ) -> MCPServer:
     servidor = MCPServer(
         "knowledge",
@@ -106,7 +106,7 @@ def criar_servidor(
         symbol: Annotated[str, Field(min_length=1, max_length=200)],
     ) -> dict[str, Any]:
         """Codigo completo de um simbolo (ex.: path="a/b.py", symbol="Classe.metodo")."""
-        partes = indice.obter_simbolo(escopo, path, symbol)
+        partes = obter_simbolo.executar(escopo, path, symbol)
         codigo, cortado = _cortar("\n".join(p.conteudo for p in partes), SIMBOLO_MAX)
         return {
             "aviso": AVISO,

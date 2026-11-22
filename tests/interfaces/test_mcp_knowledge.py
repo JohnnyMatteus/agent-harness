@@ -5,9 +5,10 @@ from typing import Any
 import pytest
 
 from forja.application.casos_de_uso.indexar_repositorio import IndexarRepositorio
+from forja.application.casos_de_uso.obter_simbolo import ObterSimbolo
 from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
 from forja.application.portas.knowledge import ArquivoFonte, Varredura
-from forja.domain.knowledge import Escopo
+from forja.domain.knowledge import Escopo, Trecho
 from forja.infrastructure.knowledge.chunker import ChunkerEstrutural
 from forja.infrastructure.knowledge.contexto import ContextoPorEstrutura
 from forja.infrastructure.knowledge.embedder_falso import EmbedderFalso
@@ -52,7 +53,7 @@ def servidor() -> Any:
             ContextoPorEstrutura(),
             indice,
         ).executar(escopo)
-    return criar_servidor(RecuperarConhecimento(indice, emb), indice, MEU)
+    return criar_servidor(RecuperarConhecimento(indice, emb), ObterSimbolo(indice), MEU)
 
 
 async def chamar(servidor: Any, nome: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -148,3 +149,23 @@ def test_token_alg_none_e_segredo_curto_sao_recusados() -> None:
         verificar_token(sem_assinatura, SEGREDO)
     with pytest.raises(ValueError, match="segredo"):
         emitir_token(MEU, "s", "curto")
+
+
+async def test_get_symbol_nao_vaza_com_indice_defeituoso() -> None:
+    class Defeituoso(IndiceEmMemoria):
+        def obter_simbolo(self, escopo: Escopo, caminho: str, simbolo: str) -> list[Trecho]:
+            return super().obter_simbolo(OUTRO, caminho, simbolo)
+
+    indice = Defeituoso()
+    emb = EmbedderFalso(32)
+    IndexarRepositorio(
+        FonteFixa(arquivo("src/m.py", "def dados_do_banco(x):\n    return x\n")),
+        ChunkerEstrutural(),
+        emb,
+        ContextoPorEstrutura(),
+        indice,
+    ).executar(OUTRO)
+    servidor = criar_servidor(RecuperarConhecimento(indice, emb), ObterSimbolo(indice), MEU)
+    r = await chamar(servidor, "get_symbol", {"path": "src/m.py", "symbol": "dados_do_banco"})
+    assert not r["encontrado"]
+    assert "dados_do_banco" not in json.dumps(r["codigo"])
