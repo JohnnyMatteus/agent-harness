@@ -12,11 +12,13 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
-| Esqueleto hexagonal, qualidade (ruff, pyright strict, pytest, hypothesis), CI | Temporal, sandbox, agente eco e telemetria |
+| Esqueleto hexagonal, qualidade (ruff, pyright strict, pytest, hypothesis), CI | |
 | Domínio: `Intent` com id determinístico, `Origem`, eventos de Intake | |
 | Domínio: máquina de estados da `Entrega` com testes de propriedade | |
 | Gateway de webhooks (HMAC, deduplicação), ACL e cliente do GitHub App | |
 | Ambiente local: Postgres+pgvector, Redis, Temporal dev server, Phoenix | |
+| `DeliveryWorkflow` no Temporal (teste com test server), agente eco e telemetria | |
+| Sandbox Docker efêmero (sem root, `--read-only`, rede interna, proxy Squid em allowlist), ADR 0032 | |
 
 RAG, política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 
@@ -120,7 +122,7 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 ## Próximos passos
 
-- M1 restante: `DeliveryWorkflow` no Temporal, sandbox efêmero, agente eco, trace ponta a ponta e teste de integração completo.
+- M1 restante: trace ponta a ponta e teste de integração completo (o do sandbox roda no CI via `infra/sandbox/preparar.sh`).
 - Aprovação humana com rejeição (hoje não há aresta no diagrama).
 - Política de risco e hooks (M5), recuperação híbrida com pgvector e BM25 (M2), evals contínuos (M8).
 - Helm e implantação em cluster.
