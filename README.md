@@ -92,6 +92,20 @@ make down                # make clean também remove os volumes
 
 Portas e a senha de desenvolvimento (`dev-only-change-me`) são variáveis do `.env`.
 
+## Knowledge (M2)
+
+Indexação incremental por SHA (tree-sitter para Python e TypeScript, cabeçalho para Markdown), recuperação híbrida (busca textual + pgvector, fusão RRF) isolada por organização e repositório na própria consulta, e servidor MCP `knowledge` cujo escopo vem de um token de sessão assinado. Conteúdo indexado é tratado como não confiável: sem symlink, sem segredo, com limite de tamanho, devolvido como dado. ADRs 0050 a 0054.
+
+```bash
+export DATABASE_URL=postgresql://forja:dev-only-change-me@localhost:5432/forja
+export FORJA_EMBEDDER=falso   # único suportado; não há adaptador de embedding real
+uv run python -m forja.interfaces.cli.indexar --raiz . --org acme --repo loja --commit "$(git rev-parse HEAD)"
+# o workflow emite FORJA_KNOWLEDGE_TOKEN (forja.infrastructure.knowledge.token_sessao.emitir_token)
+# e o agente sobe o servidor por stdio: python -m forja.interfaces.mcp
+```
+
+Limites declarados: o adaptador Postgres só foi exercitado pelo teste de integração (contêiner com pgvector), não contra um banco real; a busca textual usa `ts_rank_cd`, que aproxima BM25 mas não é BM25; o eval do CI usa embeddings falsos e corpus inventado (`evals/rag/`) e não diz nada sobre qualidade de modelo real.
+
 ## Como testar
 
 ```bash
@@ -124,7 +138,8 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 - M1 restante: trace ponta a ponta e teste de integração completo (o do sandbox roda no CI via `infra/sandbox/preparar.sh`).
 - Aprovação humana com rejeição (hoje não há aresta no diagrama).
-- Política de risco e hooks (M5), recuperação híbrida com pgvector e BM25 (M2), evals contínuos (M8).
+- Política de risco e hooks (M5) e evals contínuos (M8).
+- Knowledge (M2) pendente: adaptador de embedding real (hoje só o falso, e só por escolha explícita), reranker, prefixo de contexto gerado por modelo (ADR 0013), `similar_incidents` e `related_prs`, indexação disparada por webhook, fidelidade e latência p95 no eval.
 - Helm e implantação em cluster.
 
 ## Documentação
