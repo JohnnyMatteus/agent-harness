@@ -8,3 +8,7 @@ build/
 __pycache__/
 *.log
 .DS_Store
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+*.egg-info/
