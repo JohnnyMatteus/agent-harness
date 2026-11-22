@@ -51,6 +51,23 @@ jobs:
             "pytest=$RUNNER_TEMP/pytest.txt" "preparar=$RUNNER_TEMP/preparar.txt" \
             "proxy=$RUNNER_TEMP/proxy.txt" "containers=$RUNNER_TEMP/docker-ps.txt"
 
+  evals-regressao:
+    # Regressão DETERMINÍSTICA do harness (sem modelo, sem secrets): zero tarefas, falha, erro ou
+    # skip derrubam o job. Não mede qualidade de agente.
+    runs-on: ubuntu-latest
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Evals de regressão
+        run: uv run pytest -m eval_regressao tests/evals --junitxml="$RUNNER_TEMP/evals.xml"
+      - name: Gate (zero tarefas, skip ou erro é falha)
+        if: always()
+        run: python3 infra/ci/verificar_evals.py "$RUNNER_TEMP/evals.xml" 39
+
   compose:
     runs-on: ubuntu-latest
     steps:

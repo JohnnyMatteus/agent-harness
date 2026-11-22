@@ -8,7 +8,7 @@ Harness autônomo de engenharia com RAG: a infraestrutura em volta do modelo que
 
 Em times com agentes de código, o gargalo deixou de ser escrever código e passou a ser planejar, revisar e entregar. Sem estrutura, o agente perde contexto entre sessões, ninguém sabe por que uma mudança foi feita e não há como limitar o que ele pode fazer sozinho. A Forja transforma uma issue em uma entrega rastreável: cada etapa produz um artefato versionado (`intent.md`, `spec.md`, `plan.md`, `review.md`), humanos decidem onde o risco exige, e a cadeia de commits serve de auditoria.
 
-## Estado atual (M1, M3, M4, M5, M6 parcial e M7 só medição)
+## Estado atual (M1, M3, M4, M5, M6 parcial, M7 só medição e M8 parcial)
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
@@ -27,8 +27,9 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | M5, governança: revisores paralelos (segurança, testes, ADRs, desempenho) com scanner de segredos, review.md, check runs com anotações, `policy.yaml` (tier por caminho, label e tamanho; sem política, sempre humano), portão humano de aprovação, auto-merge só de risco baixo com checks verdes e repositório habilitado, orçamento por intenção, skills com divulgação progressiva (ADRs 0042 a 0044); a revisão fixa o SHA, falha fechada quando o diff é incompleto e exige check externo verde para o auto-merge | Auto-merge, check runs e o fluxo de aprovação só rodaram contra GitHub falso; o leitor de YAML é um subconjunto estrito (decisão do autor pendente) |
 | M6, Maintain (parcial, ADR 0045): monitor de bandas (`forja monitor`, `MonitorDeBandas` e `IncidentWorkflow` no Temporal) com bandas e URL do Prometheus do operador (`FORJA_BANDAS_DIR`, `FORJA_PROMETHEUS_URL`, `FORJA_MONITOR_REPOS`; desligado por padrão), falha fechada (`sem_dados` nunca é "tudo bem" nem abre incidente; o monitor nunca morre por falha de activity), uma tentativa paga de diagnóstico por janela, sem issue duplicada enquanto houver uma aberta, diagnóstico multiagente sem ferramenta e issue `forja:incident` (dry-run por padrão, idempotente, sem ação corretiva automática) | Nunca rodou contra Prometheus ou GitHub reais; sem recuperação/fechamento automático de incidente, staleness do Prometheus (lookback ~5 min faz um alvo parado parecer fresco por até ~5 min) não detectada, e sem indexação dos `incident.md` no RAG |
 | M7, eficiência (parcial, ADR 0046): só a medição de tokens das definições de ferramenta por agente, com teste reproduzível (estimativa de 4 caracteres por token, não a contagem do tokenizador): Executor 254 tokens das nossas 3 ferramentas e Avaliador 219, os demais agentes 0. Tool search não foi ligado porque não compensa com esse conjunto; o ADR traz a regra de quando ligar (o CLI já tem tool search nativo) | Programmatic tool calling e code execution com MCP não foram feitos: exigem execução de código nova no sandbox que tem a chave da API (decisão do autor); as definições das ferramentas nativas do CLI não foram medidas |
+| M8, evals (parcial, ADR 0047): regressão DETERMINÍSTICA de segurança (`tests/evals/seguranca/`, 18 casos: 14 reproduzem falha histórica verificada contra o commit antigo (M5 em 1f844c5/142305f, M6 em 08909c6) e 4 são invariantes (M3, M4 e `sem_dados`); todos com prova por mutação de que falham sem a proteção), pass@k e pass^k por código (`forja/domain/avaliacao.py`), gate de CI que falha com zero tarefas, skip ou erro, e painel só com métricas exportadas (`infra/observabilidade/painel-forja.json`). Os relatórios dizem o executor: sem modelo, isto mede só o harness, não a qualidade de um agente | Camada com modelo real (manual, desligada: falha alto sem configuração e nem existe ainda), tarefas reais, rubrica, ablação e a integração como motor do Construtor e do modo noturno não foram feitas; nenhum gold set foi inventado; o painel não foi aberto num Grafana real |
 
-RAG (M2) está na main com pendências; evals contínuos (M8) e o restante do M6 e do M7 ficam para os próximos passos (ver [Próximos passos](#próximos-passos)).
+RAG (M2) está na main com pendências; o restante do M6, do M7 e do M8 (evals com modelo real, tarefas reais, ablação) fica para os próximos passos (ver [Próximos passos](#próximos-passos)).
 
 ## Arquitetura
 
@@ -146,7 +147,7 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 - Agentes com ferramenta (M3/M4) rodam o CLI dentro do sandbox (modo `docker` do lançador, ADR 0036): a imagem com o CLI e o modo ainda não foram exercitados contra Docker real.
 - Rejeição como aresta da máquina de estados: hoje a rejeição encerra o workflow (ADR 0038); decisão do autor.
-- Evals contínuos (M8) ainda não foram feitos; o Maintain (M6) está parcial (ver a tabela acima).
+- Evals com modelo real, tarefas reais, rubrica, ablação e a integração como motor do Construtor e do modo noturno (M8) não foram feitos; o Maintain (M6) e a eficiência (M7) estão parciais (ver a tabela acima).
 - Knowledge (M2) pendente: adaptador de embedding real (hoje só o falso, e só por escolha explícita), reranker, prefixo de contexto gerado por modelo (ADR 0013), `similar_incidents` e `related_prs`, indexação disparada por webhook, fidelidade e latência p95 no eval.
 - Helm e implantação em cluster.
 

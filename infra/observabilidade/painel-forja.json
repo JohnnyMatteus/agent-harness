@@ -1,0 +1,214 @@
+{
+  "title": "Forja (métricas que existem)",
+  "uid": "forja-metricas",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "forja"
+  ],
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus"
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "description": "Só métricas que a Forja exporta em /metrics. Não há painel de pass@k, qualidade de agente nem taxa de eval: essas medidas não são exportadas.",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Entregas por hora",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_entregas_iniciadas_total[1h])",
+          "legendFormat": "iniciadas"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(forja_entregas_concluidas_total[1h])",
+          "legendFormat": "concluídas"
+        },
+        {
+          "refId": "C",
+          "expr": "increase(forja_entregas_erro_total[1h])",
+          "legendFormat": "com erro"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Custo estimado das sessões (USD por hora)",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_custo_usd_total[1h])",
+          "legendFormat": "USD"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Tokens por hora",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_tokens_total[1h])",
+          "legendFormat": "{{direcao}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Ações de agente bloqueadas por guardrail",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_bloqueios_hook_total[1h])",
+          "legendFormat": "{{origem}}"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(forja_sandbox_egress_bloqueios_total[1h])",
+          "legendFormat": "egress"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Monitor de bandas: verificações sem dado",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_bandas_sem_dados_total[1h])",
+          "legendFormat": "sem dados"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Diagnósticos de incidente pagos",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(forja_diagnosticos_total[1h])",
+          "legendFormat": "diagnósticos"
+        }
+      ]
+    }
+  ]
+}

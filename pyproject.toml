@@ -57,7 +57,10 @@ testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: precisa de Docker (testcontainers); roda só no CI"]
+markers = [
+    "integration: precisa de Docker (testcontainers); roda só no CI",
+    "eval_regressao: regressão determinística (código de produção, sem modelo); bloqueia o CI",
+]
 
 [tool.pyright]
 include = ["forja", "tests"]

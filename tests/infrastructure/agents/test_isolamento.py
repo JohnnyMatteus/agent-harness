@@ -19,7 +19,7 @@ from forja.infrastructure.agents.agent_sdk import LANCADOR, AgentSdkRunner, opco
 SEGREDOS = {
     "FORJA_GITHUB_WEBHOOK_SECRET": "whsec-super-secreto",
     "FORJA_GITHUB_APP_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----abc",
-    "FORJA_GITHUB_APP_ID": "123",
+    "FORJA_GITHUB_APP_ID": "918273645",
     "REDIS_URL": "redis://:senha@host/0",
     "FORJA_PANICO_TOKEN_SHA256": "ab" * 32,
     "AWS_SECRET_ACCESS_KEY": "aws-secreto",

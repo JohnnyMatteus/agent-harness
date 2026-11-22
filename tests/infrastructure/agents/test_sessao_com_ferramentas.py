@@ -62,7 +62,11 @@ async def test_hook_bloqueia_pelo_ponto_de_entrada_e_registra_o_bloqueio() -> No
         ("Write", {"file_path": None}),
     ]:
         assert negou(await chamar(hook, nome, **entrada)), (nome, entrada)
-    assert (len(bloqueios) == 9 and bloqueios[0][0] == "Edit") or len(bloqueios) == 9
+    assert [nome for nome, _ in bloqueios] == [
+        "Write", "Edit", "Write", "Read", "Bash",
+        "mcp__sandbox__exec", "mcp__sandbox__exec", "WebFetch", "Write",
+    ]  # fmt: skip
+    assert all(motivo for _, motivo in bloqueios)  # cada bloqueio traz o motivo para a auditoria
 
 
 async def test_ferramenta_descoberta_por_busca_passa_pelo_mesmo_hook_e_e_auditada() -> None:

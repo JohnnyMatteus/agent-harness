@@ -384,3 +384,39 @@ async def test_o_worker_de_producao_registra_o_monitor_e_iniciar_monitores_e_ide
                 await iniciar_monitores(env.client, ["acme/loja"], ruim, fila)
         await env.client.get_workflow_handle(ids[0]).terminate("fim do teste")
     assert len(inc.abertos) == 1
+
+
+async def _ate_um_minuto_da_hora_cheia(env: WorkflowEnvironment) -> None:
+    agora = (await env.get_current_time()).timestamp()
+    await env.sleep((3600 - 60 - agora % 3600) % 3600)
+
+
+async def test_virada_da_hora_nao_paga_dois_diagnosticos_em_minutos(env) -> None:
+    await _ate_um_minuto_da_hora_cheia(env)
+    diag, _, _ = await rodar(env, Metricas({"lat"}), iteracoes=3)
+    assert len(diag.chamadas) == 1  # 10 minutos de violação, uma hora cheia no meio
+
+
+async def test_violacao_continua_volta_a_pagar_so_depois_de_uma_hora(env) -> None:
+    await _ate_um_minuto_da_hora_cheia(env)
+    diag, _, _ = await rodar(env, Metricas({"lat"}), iteracoes=14)
+    assert len(diag.chamadas) == 2  # 65 minutos: o do início e o de 60 minutos depois
+
+
+async def test_a_espera_de_uma_hora_sobrevive_ao_continue_as_new(env) -> None:
+    await _ate_um_minuto_da_hora_cheia(env)
+    diag = Diagnostico()
+    fila = f"op-{time.time_ns()}"
+    ativ = atividades(Metricas({"lat"}), None, diag, Incidentes(), REPOS, None)
+    async with Worker(
+        env.client, task_queue=fila, workflows=[MonitorDeBandas, IncidentWorkflow],
+        activities=[ativ.checar_bandas, ativ.diagnosticar, ativ.abrir_incidente],
+    ):  # fmt: skip
+        wid = f"mon-{time.time_ns()}"
+        await env.client.start_workflow(
+            MonitorDeBandas.run, MonitorEntrada("acme/loja", 300, 1), id=wid, task_queue=fila
+        )
+        await env.sleep(700)  # uma verificação por run: aqui já houve continue_as_new
+        with contextlib.suppress(Exception):
+            await env.client.get_workflow_handle(wid).terminate("fim do teste")
+    assert len(diag.chamadas) == 1
