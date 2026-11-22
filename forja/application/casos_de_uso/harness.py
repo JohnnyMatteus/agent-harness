@@ -272,6 +272,7 @@ class ExecutarBloco(_Base):
             feedback=texto,
             completa=nova.completa,
             violacoes=tuple(violacoes),
+            sessoes=len(contrato.features),
             uso=uso,
         )
 

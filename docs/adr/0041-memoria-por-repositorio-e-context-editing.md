@@ -16,6 +16,9 @@ O memory tool e o context editing são recursos da Messages API; o Agent SDK nã
 - **Context editing:** o Avaliador roda na Messages API com `context_management` (`clear_tool_uses_20250919`, beta `context-management-2025-06-27`), `exclude_tools=["memory"]`, gatilho, retenção e mínimo de limpeza configuráveis por modelo (`EstrategiaDeContexto`). Os nomes dos campos foram conferidos contra os tipos do SDK `anthropic` instalado e há teste que falha se divergirem.
 - **Reset com handoff** é o desenho do Executor: cada sessão começa limpa e lê `progress.md`, o contrato e o log; a compactação fica com o SDK.
 
+- **Independência do Avaliador (ADR 0011):** a memória do Avaliador é um namespace próprio (`<repo>::avaliador`, `memorias_separadas`). O Executor não escreve nele nem o lê, e o prompt do Avaliador só traz o dele; `::` não é válido em nome de repositório, então nenhum dos dois endereça o namespace do outro.
+- **Custo do Avaliador:** `preco_por_milhao` é obrigatório e `FORJA_HARNESS` não liga sem `FORJA_PRECO_AVALIADOR_ENTRADA` e `_SAIDA`: custo desconhecido somaria 0 e o orçamento por intenção (M5) mentiria.
+
 ## Pendentes do autor
 
 Valores de gatilho e retenção do context editing e a escolha entre compactação e reset por modelo (hoje: reset, sem medição); curadoria da memória (hoje só tetos, sem expiração).

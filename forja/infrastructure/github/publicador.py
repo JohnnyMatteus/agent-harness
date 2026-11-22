@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+from collections.abc import Awaitable, Callable, Sequence
 
 from forja.application.portas.github import GitHubPort
 from forja.application.portas.publicador import (
@@ -10,12 +12,14 @@ from forja.application.portas.publicador import (
     RegistroIdempotencia,
     ResultadoPublicacao,
 )
+from forja.application.portas.revisao import ClienteDeRevisao
 from forja.domain.artefatos import (
     caminho_do_artefato,
     intent_id_valido,
     linha_unica,
     sanear_mensagem_de_commit,
 )
+from forja.domain.revisao import Achado, Severidade
 from forja.domain.seguranca import neutralizar_texto, repositorio_valido
 from forja.infrastructure.github.cliente import nome_da_branch
 
@@ -27,8 +31,14 @@ class PublicadorGitHub:
     nada é escrito. Todo corpo é neutralizado aqui, no ponto de saída."""
 
     def __init__(
-        self, github: GitHubPort, registro: RegistroIdempotencia, *, dry_run: bool = True
+        self,
+        github: GitHubPort,
+        registro: RegistroIdempotencia,
+        *,
+        dry_run: bool = True,
+        revisao: ClienteDeRevisao | None = None,
     ) -> None:
+        self._revisao = revisao
         self._github = github
         self._registro = registro
         self._dry_run = dry_run
@@ -125,3 +135,93 @@ class PublicadorGitHub:
             raise
         await self._registro.concluir(chave)
         return url
+
+    # --- revisão e deploy (M5) --------------------------------------------------------
+
+    async def _uma_vez(
+        self, chave: str, acao: Callable[[], Awaitable[None]]
+    ) -> ResultadoPublicacao:
+        estado = await self._registro.reivindicar(chave)
+        if estado == "concluida":
+            return "ja_publicado"
+        if estado == "em_andamento":
+            raise PublicacaoEmAndamento(chave)
+        try:
+            await acao()
+        except BaseException:
+            await self._registro.liberar(chave)
+            raise
+        await self._registro.concluir(chave)
+        return "publicado"
+
+    def _cliente(self) -> ClienteDeRevisao:
+        if self._revisao is None:
+            raise RuntimeError("cliente de revisão não configurado")
+        return self._revisao
+
+    async def check_run(
+        self,
+        repositorio: str,
+        head_sha: str,
+        nome: str,
+        achados: Sequence[Achado],
+        resumo: str,
+        chave: str,
+    ) -> str:
+        if not repositorio_valido(repositorio) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            raise ValueError("destino de check run inválido")
+        bloqueante = any(a.severidade is Severidade.BLOQUEANTE for a in achados)
+        conclusao = "failure" if bloqueante else ("neutral" if achados else "success")
+        anotacoes = [
+            {
+                "path": a.arquivo,
+                "start_line": a.linha or 1,
+                "end_line": a.linha or 1,
+                "annotation_level": "failure"
+                if a.severidade is Severidade.BLOQUEANTE
+                else "warning",
+                "message": neutralizar_texto(a.mensagem, 500),
+            }
+            for a in achados
+            if a.arquivo
+        ]
+        if self._dry_run:
+            log.info("dry-run: check run não criado", extra={"nome": nome, "conclusao": conclusao})
+            return "dry_run"
+        await self._uma_vez(
+            f"{chave}:check:{nome}:{head_sha}",
+            lambda: self._cliente().criar_check_run(
+                repositorio,
+                head_sha,
+                f"forja/{nome}",
+                conclusao,
+                f"Forja: revisão de {nome}",
+                neutralizar_texto(resumo, 4000),
+                anotacoes,
+            ),
+        )
+        return conclusao
+
+    async def marcar_pr_pronto(self, repositorio: str, numero: int, chave: str) -> str:
+        if not repositorio_valido(repositorio) or numero < 1:
+            raise ValueError("destino inválido")
+        if self._dry_run:
+            return "dry_run"
+        return await self._uma_vez(
+            f"{chave}:pronto:{numero}",
+            lambda: self._cliente().marcar_pr_pronto(repositorio, numero),
+        )
+
+    async def mesclar_pr(self, repositorio: str, numero: int, sha: str, chave: str) -> str:
+        if (
+            not repositorio_valido(repositorio)
+            or numero < 1
+            or not re.fullmatch(r"[0-9a-f]{40}", sha)
+        ):
+            raise ValueError("destino de merge inválido")
+        if self._dry_run:
+            log.info("dry-run: merge não feito", extra={"repositorio": repositorio, "pr": numero})
+            return "dry_run"
+        return await self._uma_vez(
+            f"{chave}:merge:{numero}", lambda: self._cliente().mesclar_pr(repositorio, numero, sha)
+        )

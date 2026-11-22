@@ -165,3 +165,80 @@ async def test_erro_ao_ler_artefato_sobe_em_vez_de_virar_ausencia() -> None:
     with pytest.raises(RuntimeError, match="500"):
         await pub.ler_artefato(destino(), "spec.md")
     assert await montar()[2].ler_artefato(destino(), "spec.md") is None  # ausente é None
+
+
+class ClienteDeRevisaoGravador:
+    def __init__(self) -> None:
+        self.checks, self.prontos, self.merges = [], [], []
+
+    async def criar_check_run(
+        self, repositorio, head_sha, nome, conclusao, titulo, resumo, anotacoes
+    ):
+        self.checks.append((nome, conclusao, anotacoes))
+
+    async def marcar_pr_pronto(self, repositorio, numero):
+        self.prontos.append(numero)
+
+    async def mesclar_pr(self, repositorio, numero, sha):
+        self.merges.append((numero, sha))
+
+
+
+def _publicador_de_revisao(dry_run=False):
+    cliente = ClienteDeRevisaoGravador()
+    pub = PublicadorGitHub(
+        GitHubGravador(),
+        IdempotenciaRedis(fakeredis.FakeAsyncRedis()),
+        dry_run=dry_run,
+        revisao=cliente,
+    )
+    return pub, cliente
+
+
+SHA = "a" * 40
+
+
+async def test_check_run_leva_anotacoes_neutralizadas_conclusao_e_e_idempotente() -> None:
+    from forja.domain.politica import Tier
+    from forja.domain.revisao import Achado, Severidade
+
+    pub, cliente = _publicador_de_revisao()
+    achados = [
+        Achado(
+            "seguranca",
+            Severidade.BLOQUEANTE,
+            "veja ![](https://evil.test/?d=1) @dono",
+            "src/a.py",
+            3,
+            Tier.ALTO,
+        ),
+        Achado("seguranca", Severidade.AVISO, "sem arquivo", None, None, Tier.BAIXO),
+    ]
+    assert await pub.check_run("a/b", SHA, "seguranca", achados, "r", "k") == "failure"
+    assert await pub.check_run("a/b", SHA, "seguranca", achados, "r", "k") == "failure"
+    assert len(cliente.checks) == 1  # a retentativa não duplica
+    nome, conclusao, anotacoes = cliente.checks[0]
+    assert nome == "forja/seguranca" and conclusao == "failure" and len(anotacoes) == 1
+    assert anotacoes[0]["annotation_level"] == "failure" and anotacoes[0]["start_line"] == 3
+    assert "://" not in anotacoes[0]["message"] and "@dono" not in anotacoes[0]["message"]
+    assert await pub.check_run("a/b", SHA, "testes", [], "r", "k") == "success"
+    with pytest.raises(ValueError, match="inválido"):
+        await pub.check_run("a/b", "curto", "x", [], "r", "k")
+
+
+async def test_merge_e_pr_pronto_so_com_destino_valido_idempotentes_e_em_dry_run_nao_escrevem() -> (
+    None
+):
+    pub, cliente = _publicador_de_revisao()
+    assert await pub.mesclar_pr("a/b", 7, SHA, "k") == "publicado"
+    assert await pub.mesclar_pr("a/b", 7, SHA, "k") == "ja_publicado"
+    assert await pub.marcar_pr_pronto("a/b", 7, "k") == "publicado"
+    assert cliente.merges == [(7, SHA)] and cliente.prontos == [7]
+    for args in (("../x", 7, SHA), ("a/b", 0, SHA), ("a/b", 7, "HEAD")):
+        with pytest.raises(ValueError, match="inválido"):
+            await pub.mesclar_pr(*args, "k2")
+    seco, cliente2 = _publicador_de_revisao(dry_run=True)
+    assert await seco.mesclar_pr("a/b", 7, SHA, "k") == "dry_run"
+    assert await seco.marcar_pr_pronto("a/b", 7, "k") == "dry_run"
+    assert await seco.check_run("a/b", SHA, "x", [], "r", "k") == "dry_run"
+    assert (cliente2.merges, cliente2.prontos, cliente2.checks) == ([], [], [])

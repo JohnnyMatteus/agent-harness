@@ -8,10 +8,20 @@ from urllib.parse import quote
 
 import httpx
 
+from forja.application.portas.revisao import EstadoDosChecks
 from forja.domain.artefatos import TETO_DE_ARTEFATO, ArtefatoInvalido, caminho_relativo_seguro
+from forja.domain.politica import Politica, PoliticaInvalida
+from forja.domain.revisao import ArquivoDoDiff, DiffDaEntrega
 from forja.infrastructure.github.erros import BranchProtegida, GitHubApiError
+from forja.infrastructure.yaml_estrito import YamlInvalido
+from forja.infrastructure.yaml_estrito import ler as ler_yaml
 
 PREFIXO_BRANCH = "forja/"
+TETO_DE_PATCH = 8_000
+_PR_PRONTO = (
+    "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
+    "{ clientMutationId } }"
+)
 _PERMISSOES_ESCRITA = {"admin", "maintain", "write"}
 
 
@@ -109,6 +119,100 @@ class GitHubCliente:
             {"title": titulo, "head": branch, "base": padrao, "body": corpo, "draft": rascunho},
         )
         return str(pr["html_url"])
+
+    # --- revisão e deploy -------------------------------------------------------------
+
+    async def diff_da_entrega(self, repositorio: str, branch: str) -> DiffDaEntrega:
+        padrao = (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
+        comparacao = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/compare/{quote(padrao)}...{quote(branch)}"
+        )
+        arquivos: list[ArquivoDoDiff] = []
+        for f in comparacao.get("files", [])[:300]:
+            arquivos.append(
+                ArquivoDoDiff(
+                    f["filename"],
+                    str(f.get("status", "modified")),
+                    int(f.get("additions", 0)),
+                    int(f.get("deletions", 0)),
+                    str(f.get("patch", ""))[:TETO_DE_PATCH],
+                )
+            )
+        sha = str(comparacao.get("commits", [{}])[-1].get("sha", ""))
+        return DiffDaEntrega(tuple(arquivos), sha)
+
+    async def politica(self, repositorio: str) -> Politica:
+        padrao = (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
+        texto = await self.ler_arquivo(repositorio, padrao, ".forja/policy.yaml")
+        if texto is None:
+            return Politica.padrao_fechado()
+        try:
+            return Politica.de_dict(ler_yaml(texto))
+        except (YamlInvalido, PoliticaInvalida):
+            return Politica.padrao_fechado()  # política ilegível: fecha, não abre
+
+    async def estado_dos_checks(self, repositorio: str, sha: str) -> EstadoDosChecks:
+        dados = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/commits/{sha}/check-runs?per_page=100"
+        )
+        runs = dados.get("check_runs", [])
+        if any(
+            r.get("conclusion") in ("failure", "cancelled", "timed_out", "action_required")
+            for r in runs
+        ):
+            return "falhou"
+        if not runs or any(r.get("status") != "completed" for r in runs):
+            return "pendente"
+        return "verde"
+
+    async def numero_do_pr(self, repositorio: str, branch: str) -> int | None:
+        dono = repositorio.split("/")[0]
+        abertos = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/pulls?head={quote(dono)}:{quote(branch)}"
+        )
+        return int(abertos[0]["number"]) if abertos else None
+
+    async def criar_check_run(
+        self, repositorio: str, head_sha: str, nome: str, conclusao: str, titulo: str,
+        resumo: str, anotacoes: list[dict[str, Any]],
+    ) -> None:  # fmt: skip
+        await self._chamar(
+            "POST",
+            repositorio,
+            f"/repos/{repositorio}/check-runs",
+            {
+                "name": nome[:80],
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": conclusao,
+                "output": {
+                    "title": titulo[:120],
+                    "summary": resumo[:60_000],
+                    "annotations": anotacoes[:50],
+                },
+            },
+        )
+
+    async def marcar_pr_pronto(self, repositorio: str, numero: int) -> None:
+        pr = await self._chamar("GET", repositorio, f"/repos/{repositorio}/pulls/{numero}")
+        resposta = await self._chamar(
+            "POST",
+            repositorio,
+            "/graphql",
+            {"query": _PR_PRONTO, "variables": {"id": pr["node_id"]}},
+        )
+        if resposta.get("errors"):  # o GraphQL devolve 200 com `errors`: não é sucesso
+            raise GitHubApiError(200, "graphql markPullRequestReadyForReview")
+
+    async def mesclar_pr(self, repositorio: str, numero: int, sha: str) -> None:
+        resposta = await self._chamar(
+            "PUT",
+            repositorio,
+            f"/repos/{repositorio}/pulls/{numero}/merge",
+            {"sha": sha, "merge_method": "squash"},
+        )
+        if resposta.get("merged") is not True:  # só `merged: true` é merge feito
+            raise GitHubApiError(200, "merge não confirmado")
 
     async def _conteudo(self, repositorio: str, url: str, ref: str) -> tuple[str, str] | None:
         try:

@@ -7,11 +7,9 @@ tocados, labels e achados dos revisores.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from functools import lru_cache
 from typing import Any, cast
 
 from forja.domain.erros import ErroDeDominio
@@ -31,31 +29,55 @@ class Tier(IntEnum):
         return self is not Tier.BAIXO
 
 
-@lru_cache(maxsize=256)
-def _regex_do_glob(padrao: str) -> re.Pattern[str]:
-    saida: list[str] = []
-    i = 0
-    while i < len(padrao):
-        if padrao.startswith("**/", i):
-            saida.append("(?:.*/)?")
-            i += 3
-        elif padrao.startswith("**", i):
-            saida.append(".*")
-            i += 2
-        elif padrao[i] == "*":
-            saida.append("[^/]*")
+def _segmento_casa(padrao: str, texto: str) -> bool:
+    """`*` e `?` dentro de um segmento, em tempo O(n*m) e sem regex (o padrão é do repositório-alvo
+    e uma regex com `*` encadeados teria backtracking exponencial)."""
+    i = j = 0
+    estrela = -1
+    marca = 0
+    while j < len(texto):
+        if i < len(padrao) and padrao[i] in ("?", texto[j]) and padrao[i] != "*":
             i += 1
-        elif padrao[i] == "?":
-            saida.append("[^/]")
+            j += 1
+        elif i < len(padrao) and padrao[i] == "*":
+            estrela, marca = i, j
             i += 1
+        elif estrela >= 0:
+            i = estrela + 1
+            marca += 1
+            j = marca
         else:
-            saida.append(re.escape(padrao[i]))
-            i += 1
-    return re.compile("".join(saida))
+            return False
+    return all(c == "*" for c in padrao[i:])
 
 
 def casar_glob(padrao: str, caminho: str) -> bool:
-    return _regex_do_glob(padrao).fullmatch(caminho) is not None
+    """Casamento por segmentos: `**` sozinho num segmento casa zero ou mais segmentos (um `**`
+    final casa ao menos um); `*` e `?` valem dentro de um segmento. Tempo O(P*S)."""
+    if len(padrao) > 200 or len(caminho) > 400:
+        return False
+    padroes: list[str] = []
+    for p in padrao.split("/"):
+        if p == "**" and padroes and padroes[-1] == "**":
+            continue  # `**/**/**` equivale a `**`
+        padroes.append(p)
+    segmentos = caminho.split("/")
+    np_, ns = len(padroes), len(segmentos)
+    # casa[i][j]: padroes[i:] casa segmentos[j:]
+    casa = [[False] * (ns + 1) for _ in range(np_ + 1)]
+    casa[np_][ns] = True
+    for i in range(np_ - 1, -1, -1):
+        for j in range(ns, -1, -1):
+            if padroes[i] == "**":
+                if i == np_ - 1:
+                    casa[i][j] = j < ns  # `**` final: ao menos um segmento
+                else:
+                    casa[i][j] = casa[i + 1][j] or (j < ns and casa[i][j + 1])
+            else:
+                casa[i][j] = (
+                    j < ns and _segmento_casa(padroes[i], segmentos[j]) and casa[i + 1][j + 1]
+                )
+    return casa[0][0]
 
 
 @dataclass(frozen=True, slots=True)

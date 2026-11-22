@@ -21,15 +21,20 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from forja.domain.entrega import Entrega
-    from forja.domain.estados import Estado
+    from forja.domain.estados import Estado, RaioDeImpacto
+    from forja.domain.politica import Tier
     from forja.infrastructure.temporal.activities import (
         ArtefatoEntrada,
+        DeployEntrada,
         EtapaEntrada,
         EtapaSaida,
         HarnessEntrada,
         HarnessSaida,
+        PoliticaDto,
         PrEntrada,
         PublicarEntrada,
+        RevisaoEntrada,
+        RevisaoSaida,
     )
 
 # Erros que repetir não resolve: saída de modelo fora do schema, dado inválido, branch recusada.
@@ -43,6 +48,8 @@ class Desfecho(StrEnum):
     REJEITADA = "rejeitada"
     ARTEFATOS_PUBLICADOS = "artefatos_publicados"
     VERIFICADA = "verificada"
+    APROVADA = "aprovada"
+    MESCLADA = "mesclada"
     FALHOU = "falhou"
 
 
@@ -64,6 +71,11 @@ class DeliveryEntrada:
     solicitantes: list[str] = field(default_factory=list[str])
     # Build de longa duração (M4): só com `harness` o workflow passa do PR de artefatos.
     harness: bool = False
+    # Labels da issue (entram na classificação de risco) e se o dono habilitou auto-merge.
+    labels: list[str] = field(default_factory=list[str])
+    automerge: bool = False
+    espera_dos_checks_s: float = 300
+    max_esperas_dos_checks: int = 12
     rodadas_sem_progresso: int = 3
     max_blocos: int = 20
     timeout_bloco_s: float = 4 * 3600
@@ -101,6 +113,8 @@ class DeliveryWorkflow:
         self._pr_url = ""
         self._motivo = ""
         self._solicitantes: frozenset[str] = frozenset()
+        self._sessoes = 0
+        self._politica = PoliticaDto()
         self._custo = 0.0
 
     @workflow.signal
@@ -240,6 +254,13 @@ class DeliveryWorkflow:
 
         Uma falha de bloco devolve o feedback ao próximo bloco; sem progresso por
         `rodadas_sem_progresso` rodadas seguidas, a entrega falha para um humano."""
+        self._politica = await workflow.execute_activity(
+            "carregar_politica",
+            entrada.repositorio,
+            result_type=PoliticaDto,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )
         base = self._harness_entrada(entrada)
         iniciado = await self._harness("harness_inicializar", base, entrada)
         self._custo += iniciado.custo_usd
@@ -247,12 +268,15 @@ class DeliveryWorkflow:
         completa = False
         while not completa:
             n += 1
+            if (motivo := self._orcamento_estourado()) is not None:
+                return await self._falhar(entrada, motivo)
             if n > entrada.max_blocos:
                 return await self._falhar(entrada, f"limite de {entrada.max_blocos} blocos")
             r = await self._harness(
                 "harness_bloco", self._harness_entrada(entrada, n, feedback), entrada
             )
             self._custo += r.custo_usd
+            self._sessoes += r.sessoes
             completa = r.completa
             feito = ", ".join(r.aprovadas) or "nenhuma"
             falta = ", ".join(r.reprovadas) or "nenhuma"
@@ -281,13 +305,121 @@ class DeliveryWorkflow:
             )
         entrega.registrar_verificacao(verde=True)  # Test -> Review (PRAberto)
         self._pr_url = await self._abrir_pr(entrada, verificado=True)
+        return await self._revisar_e_decidir(entrada, entrega)
+
+    def _orcamento_estourado(self) -> str | None:
+        """Política de orçamento (seção 9.1): custo e sessões por intenção. 0 = sem teto."""
+        p = self._politica
+        if p.por_intent_usd and self._custo >= p.por_intent_usd:
+            return (
+                f"orçamento por intenção esgotado ({self._custo:.2f} de {p.por_intent_usd:.2f} USD)"
+            )
+        if p.max_sessoes and self._sessoes >= p.max_sessoes:
+            return f"limite de {p.max_sessoes} sessões por intenção atingido"
+        return None
+
+    async def _revisar_e_decidir(self, entrada: DeliveryEntrada, entrega: Entrega) -> Desfecho:
+        """Review: revisores em paralelo, review.md, check runs; depois raio de impacto, portão
+        humano (aprovar ou rejeitar) ou auto-merge. Sem política declarada, sempre humano."""
+        if (motivo := self._orcamento_estourado()) is not None:
+            return await self._falhar(entrada, motivo)
+        revisao: RevisaoSaida = await workflow.execute_activity(
+            "revisar",
+            RevisaoEntrada(
+                entrada.repositorio,
+                entrada.intent_id,
+                entrada.slug,
+                dict(self._artefatos),
+                list(entrada.labels),
+                entrada.numero,
+            ),
+            result_type=RevisaoSaida,
+            start_to_close_timeout=timedelta(seconds=entrada.timeout_etapa_s),
+            heartbeat_timeout=timedelta(seconds=entrada.heartbeat_s),
+            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+            retry_policy=RetryPolicy(maximum_attempts=2, non_retryable_error_types=NAO_REPETIR),
+        )
+        self._custo += revisao.custo_usd
+        self._artefatos["review.md"] = revisao.review_md
+        await self._commitar(entrada, "review.md", "review")
+        await workflow.execute_activity(
+            "publicar_checks",
+            args=[
+                RevisaoEntrada(entrada.repositorio, entrada.intent_id, entrada.slug),
+                revisao.achados,
+            ],
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=180),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
+        )
+        bloqueantes = [a for a in revisao.achados if a.severidade == "bloqueante"]
+        tier = Tier(revisao.tier)
+        if bloqueantes:
+            entrega.concluir_review(achados_bloqueantes=True, raio=RaioDeImpacto.ALTO)
+            lista = "; ".join(f"{a.revisor}: {a.mensagem[:120]}" for a in bloqueantes[:5])
+            return await self._falhar(entrada, f"achados bloqueantes da revisão: {lista}")
+        pode_automerge = entrada.automerge and tier is Tier.BAIXO
+        entrega.concluir_review(
+            achados_bloqueantes=False,
+            raio=RaioDeImpacto.BAIXO if tier is Tier.BAIXO else RaioDeImpacto.ALTO,
+            politica_permite_deploy=pode_automerge,
+        )
+        deploy = DeployEntrada(entrada.repositorio, entrada.intent_id, entrada.slug)
+        if entrega.estado is Estado.DEPLOY:
+            return await self._auto_merge(entrada, entrega, deploy)
+        motivos = "; ".join(revisao.motivos) or "sem motivos de elevação"
+        self._abrir_portao("aprovacao")
         await self._comentar(
             entrada,
-            "verificada",
-            f"Verificação verde em todas as funcionalidades. PR em rascunho: {self._pr_url}. "
-            "A revisão é a próxima etapa.",
+            "aprovacao",
+            f"Revisão concluída; risco {tier.name.lower()} ({motivos}). Um humano decide: "
+            "`/forja approve` ou `/forja reject <motivo>`.",
         )
-        return Desfecho.VERIFICADA
+        decisao, quem, motivo = await self._esperar_decisao(entrada, "aprovação humana do PR")
+        if decisao == "rejeitada":
+            return await self._encerrar_rejeitado(entrada, "pr", quem, motivo)
+        entrega.aprovar(quem)  # AguardandoHumano -> Deploy (Approved-By)
+        await workflow.execute_activity(
+            "marcar_pronto", deploy, result_type=str,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )  # fmt: skip
+        await self._comentar(
+            entrada, "aprovada", f"Aprovado por {quem}. PR pronto para revisão: o merge é humano."
+        )
+        return Desfecho.APROVADA
+
+    async def _auto_merge(
+        self, entrada: DeliveryEntrada, entrega: Entrega, deploy: DeployEntrada
+    ) -> Desfecho:
+        """Auto-merge só com tier baixo, política permitindo, dono habilitando e checks verdes."""
+        for _ in range(entrada.max_esperas_dos_checks):
+            estado = await workflow.execute_activity(
+                "estado_dos_checks", deploy, result_type=str,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )  # fmt: skip
+            if estado == "verde":
+                resultado = await workflow.execute_activity(
+                    "mesclar",
+                    deploy,
+                    result_type=str,
+                    start_to_close_timeout=timedelta(seconds=180),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=3, non_retryable_error_types=NAO_REPETIR
+                    ),
+                )
+                if resultado in ("publicado", "ja_publicado"):
+                    entrega.concluir_deploy()
+                    await self._comentar(
+                        entrada, "mesclada", "Risco baixo e checks verdes: PR mesclado."
+                    )
+                    return Desfecho.MESCLADA
+                return await self._falhar(entrada, f"merge não realizado ({resultado})")
+            if estado == "falhou":
+                return await self._falhar(entrada, "checks do PR falharam")
+            await workflow.sleep(timedelta(seconds=entrada.espera_dos_checks_s))
+        return await self._falhar(entrada, "checks do PR não terminaram a tempo")
 
     def _harness_entrada(
         self, e: DeliveryEntrada, bloco: int = 0, feedback: str = ""

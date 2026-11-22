@@ -8,7 +8,7 @@ Harness autônomo de engenharia com RAG: a infraestrutura em volta do modelo que
 
 Em times com agentes de código, o gargalo deixou de ser escrever código e passou a ser planejar, revisar e entregar. Sem estrutura, o agente perde contexto entre sessões, ninguém sabe por que uma mudança foi feita e não há como limitar o que ele pode fazer sozinho. A Forja transforma uma issue em uma entrega rastreável: cada etapa produz um artefato versionado (`intent.md`, `spec.md`, `plan.md`, `review.md`), humanos decidem onde o risco exige, e a cadeia de commits serve de auditoria.
 
-## Estado atual (M1, M3 e M4)
+## Estado atual (M1, M3, M4 e M5)
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
@@ -23,7 +23,8 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); o isolamento do SDK tem teste do comando e do ambiente efetivos | |
 
 | M3, SDLC até o PR: Intérprete, Spec (pesquisadores em paralelo sobre o RAG do M2, citação obrigatória), Planner, artefatos em `.forja/<intent-id>/`, portão de spec por `/forja approve` e `/forja reject`, PR em rascunho (ADRs 0037 e 0038); teste ponta a ponta em `tests/integracao/test_sdlc_ponta_a_ponta.py` | |
-| M4, harness de longa duração: Inicializador, blocos com contrato de sprint, Executor com ferramentas no sandbox sob guardrails (PreToolUse e auditoria do diff), grader de código, Avaliador independente com context editing, memória por repositório, verificação final e PR (ADRs 0039 a 0041). Ligado por `FORJA_HARNESS=true` (exige aceite explícito do risco da chave no sandbox, ADR 0040); a fronteira de segurança é o container, não a allowlist de comandos; teste ponta a ponta com git real em `tests/integracao/test_harness_ponta_a_ponta.py` | O modo `docker` do lançador e a imagem `forja-agente` não foram exercitados contra Docker real |
+| M4, harness de longa duração: Inicializador, blocos com contrato de sprint, Executor com ferramentas no sandbox sob guardrails (PreToolUse e auditoria do diff), grader de código, Avaliador independente com context editing, memória por repositório, verificação final e PR (ADRs 0039 a 0041). Ligado por `FORJA_HARNESS=true` (exige aceite explícito do risco da chave no sandbox, ADR 0040); a fronteira de segurança é o container, não a allowlist de comandos; teste ponta a ponta com git real em `tests/integracao/test_harness_ponta_a_ponta.py` | O modo Docker (sandbox, lançador `docker` e imagem `forja-agente`) nunca rodou contra Docker real; submódulo git não é suportado (a sessão é recusada) |
+| M5, governança: revisores paralelos (segurança, testes, ADRs, desempenho) com scanner de segredos, review.md, check runs com anotações, `policy.yaml` (tier por caminho, label e tamanho; sem política, sempre humano), portão humano de aprovação, auto-merge só de risco baixo com checks verdes e repositório habilitado, orçamento por intenção (ADRs 0042 e 0043) | Auto-merge, check runs e o fluxo de aprovação só rodaram contra GitHub falso; o leitor de YAML é um subconjunto estrito (decisão do autor pendente) |
 
 RAG (M2) está na main; política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 

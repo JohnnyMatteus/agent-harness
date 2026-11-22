@@ -120,3 +120,88 @@ async def test_leitura_de_arquivo_distingue_ausencia_erro_e_tamanho_absurdo() ->
             ok = base64.b64encode(b"oi").decode()
             rota.respond(200, json={"content": ok, "sha": "s", "size": 2})
             assert await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md") == "oi"
+
+
+async def test_diff_politica_checks_pr_pronto_e_merge_do_cliente() -> None:
+    import base64
+
+    from forja.domain.politica import Tier
+    from forja.infrastructure.github.erros import GitHubApiError
+
+    async with httpx.AsyncClient(base_url="https://api.github.com") as http:
+        c = GitHubCliente(AuthFalso(), http)
+        with respx.mock(base_url="https://api.github.com") as mock:
+            mock.get(f"/repos/{REPO}").respond(200, json={"default_branch": "main"})
+            mock.get(f"/repos/{REPO}/compare/main...forja/x").respond(
+                200,
+                json={
+                    "files": [
+                        {
+                            "filename": "src/a.py",
+                            "status": "added",
+                            "additions": 5,
+                            "deletions": 1,
+                            "patch": "+x" * 9000,
+                        }
+                    ],
+                    "commits": [{"sha": "c" * 40}],
+                },
+            )
+            d = await c.diff_da_entrega(REPO, "forja/x")
+            assert (
+                d.caminhos == ("src/a.py",) and d.linhas_alteradas == 6 and d.head_sha == "c" * 40
+            )
+            assert len(d.arquivos[0].patch) <= 8000  # patch limitado
+
+            politica = mock.get(f"/repos/{REPO}/contents/.forja/policy.yaml")
+            ok = 'risk_tiers:\n  low:\n    paths: ["docs/**"]\n'
+            politica.respond(
+                200,
+                json={"content": base64.b64encode(ok.encode()).decode(), "sha": "s", "size": 40},
+            )
+            assert (await c.politica(REPO)).classificar(["docs/a.md"], [], 1).tier is Tier.BAIXO
+            politica.respond(404)
+            assert not (await c.politica(REPO)).declarada  # ausente: fechada
+            ruim = "risk_tiers: {low: 1}"  # fora do subconjunto: fechada, nunca aberta
+            politica.respond(
+                200,
+                json={"content": base64.b64encode(ruim.encode()).decode(), "sha": "s", "size": 10},
+            )
+            assert (await c.politica(REPO)).classificar(["docs/a.md"], [], 1).tier is Tier.ALTO
+
+            checks = mock.get(f"/repos/{REPO}/commits/{'c' * 40}/check-runs")
+            checks.respond(200, json={"check_runs": []})
+            assert await c.estado_dos_checks(REPO, "c" * 40) == "pendente"
+            checks.respond(
+                200,
+                json={
+                    "check_runs": [
+                        {"status": "completed", "conclusion": "success"},
+                        {"status": "in_progress", "conclusion": None},
+                    ]
+                },
+            )
+            assert await c.estado_dos_checks(REPO, "c" * 40) == "pendente"
+            checks.respond(
+                200, json={"check_runs": [{"status": "completed", "conclusion": "failure"}]}
+            )
+            assert await c.estado_dos_checks(REPO, "c" * 40) == "falhou"
+            checks.respond(
+                200, json={"check_runs": [{"status": "completed", "conclusion": "neutral"}]}
+            )
+            assert await c.estado_dos_checks(REPO, "c" * 40) == "verde"
+
+            mock.get(f"/repos/{REPO}/pulls/7").respond(200, json={"node_id": "N7"})
+            gql = mock.post("/graphql")
+            gql.respond(200, json={"errors": [{"message": "x"}]})
+            with pytest.raises(GitHubApiError):  # 200 com errors não é sucesso
+                await c.marcar_pr_pronto(REPO, 7)
+            gql.respond(200, json={"data": {}})
+            await c.marcar_pr_pronto(REPO, 7)
+
+            merge = mock.put(f"/repos/{REPO}/pulls/7/merge")
+            merge.respond(200, json={"merged": False, "message": "x"})
+            with pytest.raises(GitHubApiError):  # só merged:true é merge
+                await c.mesclar_pr(REPO, 7, "c" * 40)
+            merge.respond(200, json={"merged": True})
+            await c.mesclar_pr(REPO, 7, "c" * 40)

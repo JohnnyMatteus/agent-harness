@@ -3,6 +3,8 @@ objeto de domínio; campo extra, tamanho acima do teto ou tipo errado é recusad
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from forja.domain.artefatos import Cenario, Fonte, IntentMd, PassoDoPlano, Plano, Spec
@@ -120,3 +122,18 @@ class ContratoSaida(_Saida):
     features: list[str] = Field(min_length=1, max_length=10)
     entregaveis: list[str] = Field(min_length=1, max_length=10)
     verificacao: list[str] = Field(min_length=1, max_length=10)
+
+
+class AchadoDoRevisorSaida(_Saida):
+    severidade: Literal["bloqueante", "aviso"]
+    mensagem: str = Field(min_length=1, max_length=500)
+    arquivo: str | None = Field(default=None, max_length=300)
+    linha: int | None = Field(default=None, ge=1, le=1_000_000)
+    risco: Literal["baixo", "medio", "alto"] = "baixo"
+
+
+class RevisaoDeModeloSaida(_Saida):
+    resumo: str = Field(min_length=1, max_length=600)
+    achados: list[AchadoDoRevisorSaida] = Field(
+        default_factory=list[AchadoDoRevisorSaida], max_length=30
+    )

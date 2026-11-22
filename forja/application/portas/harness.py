@@ -29,6 +29,7 @@ class ResultadoDoBloco:
     feedback: str
     completa: bool
     violacoes: tuple[str, ...] = ()
+    sessoes: int = 0
     uso: UsoModelo = field(default_factory=UsoModelo)
 
 

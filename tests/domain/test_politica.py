@@ -113,3 +113,21 @@ def test_orcamento_padrao_quando_nao_declarado_e_vazio_e_valido() -> None:
         and p.orcamento == Orcamento()
         and p.classificar(["docs/a.md"], [], 1).tier is Tier.MEDIO
     )
+
+
+def test_padrao_adversario_do_repositorio_nao_causa_backtracking_exponencial() -> None:
+    import time
+
+    caminho = "/".join(["a"] * 60) + "/b.txt"
+    adversarios = [
+        "/".join(["**"] * 40) + "/x",
+        "**/" * 30 + "*.py",
+        "*a" * 50 + "b",
+        "/".join(["*a*a*a*a*a*b"] * 20),
+        "**/" + "*/" * 30 + "x",
+    ]
+    inicio = time.monotonic()
+    for padrao in adversarios:
+        assert casar_glob(padrao, caminho) is False
+    assert time.monotonic() - inicio < 1.0
+    assert casar_glob("/".join(["**"] * 40) + "/b.txt", caminho) is True  # e os que casam, casam

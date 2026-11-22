@@ -78,6 +78,28 @@ class Montagem:
         return self.git("show", f"{BRANCH}:{caminho}", cwd=self.bare)
 
 
+POLITICA_BAIXA = 'risk_tiers:\n  low:\n    paths: ["**"]\n'
+
+
+def _arquivos_do_diff() -> list[dict]:
+    return [
+        {
+            "filename": "src/f1.py",
+            "status": "added",
+            "additions": 1,
+            "deletions": 0,
+            "patch": "+OK = True",
+        },
+        {
+            "filename": "tests/test_f1.py",
+            "status": "added",
+            "additions": 3,
+            "deletions": 0,
+            "patch": "+def test_ok(): ...",
+        },
+    ]
+
+
 @pytest_asyncio.fixture(loop_scope="module")
 async def amb_h(temporal, chave_pem, tmp_path, monkeypatch):
     montagem = Montagem(tmp_path)
@@ -86,6 +108,26 @@ async def amb_h(temporal, chave_pem, tmp_path, monkeypatch):
     ) as a:
         a.montagem = montagem  # type: ignore[attr-defined]
         a.sdk.pontos = []
+        a.github.arquivos_do_diff = _arquivos_do_diff()
+        yield a
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def amb_automerge(temporal, chave_pem, tmp_path, monkeypatch):
+    import base64
+
+    montagem = Montagem(tmp_path)
+    async with ambiente(
+        temporal, chave_pem, tmp_path, monkeypatch, lambda _: montagem.harness,
+        automerge=frozenset({REPO}),
+    ) as a:  # fmt: skip
+        a.montagem = montagem  # type: ignore[attr-defined]
+        a.sdk.pontos = []
+        a.github.arquivos_do_diff = _arquivos_do_diff()
+        a.github.arquivos[("main", ".forja/policy.yaml")] = {
+            "content": base64.b64encode(POLITICA_BAIXA.encode()).decode(),
+            "sha": "p",
+        }
         yield a
 
 
@@ -99,12 +141,7 @@ async def test_do_webhook_ao_pr_verificado_com_git_real(amb_h: Ambiente) -> None
     m: Montagem = amb_h.montagem  # type: ignore[attr-defined]
     await _ate_o_build(amb_h, "h1")
     await esperar(lambda: len(amb_h.github.prs) == 1, 60)
-    # O PR abre ANTES do comentário final e do registro do desfecho (a última activity do
-    # workflow): quem confere isso precisa esperar a condição, não o PR.
-    await esperar(lambda: any("Verificação verde" in c for c in amb_h.comentarios()), 60)
-    await esperar(
-        lambda: "forja_entregas_concluidas_total 1.0" in amb_h.metricas.exportar().decode(), 60
-    )
+    await esperar(lambda: any("Um humano decide" in c for c in amb_h.comentarios()), 60)
 
     lista = FeatureList.de_json(m.na_branch(f".forja/{ID}/feature_list.json"))
     assert [f.passes for f in lista.features] == [True, True]
@@ -115,10 +152,14 @@ async def test_do_webhook_ao_pr_verificado_com_git_real(amb_h: Ambiente) -> None
     assert "feature_list.json" not in m.git("log", BRANCH, "--format=%an", cwd=m.bare)
     assert "passaram na verificação" in amb_h.github.prs[0]["body"]
     assert any("Bloco 1: aprovadas f1, f2" in c for c in amb_h.comentarios())
-    assert any("Verificação verde" in c for c in amb_h.comentarios())
+    assert any("Um humano decide" in c for c in amb_h.comentarios())
     assert m.sandbox.criados and set(m.sandbox.criados) == set(m.sandbox.destruidos)
-    texto = amb_h.metricas.exportar().decode()
-    assert "forja_custo_usd_total" in texto and "forja_entregas_concluidas_total 1.0" in texto
+    # A entrega só termina depois da aprovação humana; o desfecho é a última activity.
+    await amb_h.comentar("/forja approve", "h1-a")
+    await esperar(
+        lambda: "forja_entregas_concluidas_total 1.0" in amb_h.metricas.exportar().decode(), 60
+    )
+    assert "forja_custo_usd_total" in amb_h.metricas.exportar().decode()
     spans = amb_h.spans.get_finished_spans()
     inicio = next(s for s in spans if "StartWorkflow" in s.name)
     raiz = getattr(inicio.context, "trace_id", None)
@@ -138,3 +179,46 @@ async def test_sessao_que_trapaceia_e_descartada_e_a_entrega_falha_para_um_human
     assert not any(f.passes for f in lista.features)
     assert m.na_branch("tests/test_smoke.py") == "def test_s():\n    assert True\n"
     assert any("tests/test_smoke.py" in v for v in m.violacoes)
+
+
+async def test_revisao_check_runs_e_aprovacao_humana_sem_politica_declarada(
+    amb_h: Ambiente,
+) -> None:
+    await _ate_o_build(amb_h, "r1")
+    await esperar(lambda: any("Um humano decide" in c for c in amb_h.comentarios()), 90)
+    # sem .forja/policy.yaml na branch padrão: nada é baixo risco, mesmo com auto-merge possível
+    assert "risco alto" in " ".join(amb_h.comentarios()) and amb_h.github.merges == []
+    nomes = [c["name"] for c in amb_h.github.check_runs]
+    assert sorted(nomes) == ["forja/adrs", "forja/desempenho", "forja/seguranca", "forja/testes"]
+    assert {c["head_sha"] for c in amb_h.github.check_runs} == {amb_h.github.ref_final}
+    assert all(c["conclusion"] == "success" for c in amb_h.github.check_runs)
+    # review.md vai pela API de conteúdo do GitHub (falso aqui), não pelo git do worktree
+    assert "# review" in amb_h.github.arquivo(BRANCH, f".forja/{ID}/review.md")
+    await amb_h.comentar("/forja approve", "r1-a")
+    await esperar(lambda: any("Aprovado por" in c for c in amb_h.comentarios()), 30)
+    assert amb_h.github.prontos == ["PR_1"] and amb_h.github.merges == []  # o merge é humano
+
+
+async def test_risco_baixo_com_politica_declarada_e_auto_merge_habilitado_mescla(
+    amb_automerge: Ambiente,
+) -> None:
+    amb = amb_automerge
+    await _ate_o_build(amb, "m1")
+    await esperar(lambda: any("PR mesclado" in c for c in amb.comentarios()), 90)
+    assert len(amb.github.merges) == 1 and amb.github.merges[0]["sha"] == amb.github.ref_final
+    assert amb.github.merges[0]["merge_method"] == "squash" and amb.github.prontos == ["PR_1"]
+    await esperar(  # o desfecho é a última activity, depois do comentário final
+        lambda: "forja_entregas_concluidas_total 1.0" in amb.metricas.exportar().decode(), 60
+    )
+
+
+async def test_segredo_no_diff_barra_a_entrega_mesmo_com_o_modelo_dizendo_que_esta_tudo_bem(
+    amb_automerge: Ambiente,
+) -> None:
+    amb = amb_automerge
+    amb.github.arquivos_do_diff[0]["patch"] = "+TOKEN = 'ghp_" + "a" * 30 + "'"
+    await _ate_o_build(amb, "s1")
+    await esperar(lambda: any("achados bloqueantes" in c for c in amb.comentarios()), 90)
+    seg = next(c for c in amb.github.check_runs if c["name"] == "forja/seguranca")
+    assert seg["conclusion"] == "failure" and seg["output"]["annotations"][0]["path"] == "src/f1.py"
+    assert amb.github.merges == [] and amb.github.prontos == []

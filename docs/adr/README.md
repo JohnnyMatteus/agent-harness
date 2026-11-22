@@ -41,6 +41,8 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0039](0039-build-de-longa-duracao-estado-na-branch-e-grader-de-codigo.md) | local | Build de longa duração: estado na branch, git no workflow, `passes` por código | M4 |
 | [0040](0040-guardrails-de-ferramenta-hook-e-auditoria-do-diff.md) | local | Guardrails: PreToolUse com negação por padrão e auditoria do diff | M4 |
 | [0041](0041-memoria-por-repositorio-e-context-editing.md) | local | Memória por repositório em Postgres e context editing no Avaliador | M4 |
+| [0042](0042-politica-de-risco-e-leitor-yaml-estrito.md) | local | Política de risco como código e leitor de YAML estrito (decisão de formato pendente) | M5 |
+| [0043](0043-revisao-paralela-check-runs-e-decisao-de-deploy.md) | local | Revisão paralela, check runs, auto-merge por tier e orçamento | M5 |
 
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 

@@ -18,6 +18,11 @@ class GitHubFalso:
         self.commits: list[dict[str, Any]] = []
         self.prs: list[dict[str, Any]] = []
         self.falhar_leitura = False
+        self.check_runs: list[dict[str, Any]] = []
+        self.merges: list[dict[str, Any]] = []
+        self.prontos: list[str] = []
+        self.arquivos_do_diff: list[dict[str, Any]] = []
+        self.ref_final = "b" * 40
         self.app = self._criar_app()
 
     def arquivo(self, branch: str, caminho: str) -> str:
@@ -106,8 +111,38 @@ class GitHubFalso:
         @app.post("/repos/{dono}/{nome}/pulls", status_code=201)
         async def criar_pr(dono: str, nome: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
             pr = await request.json()
-            pr["html_url"] = f"https://github.test/{dono}/{nome}/pull/{len(self.prs) + 1}"
+            pr["number"] = len(self.prs) + 1
+            pr["html_url"] = f"https://github.test/{dono}/{nome}/pull/{pr['number']}"
             self.prs.append(pr)
             return pr
+
+        @app.get("/repos/{dono}/{nome}/compare/{spec:path}")
+        async def comparar(dono: str, nome: str, spec: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            return {"files": self.arquivos_do_diff, "commits": [{"sha": self.ref_final}]}
+
+        @app.post("/repos/{dono}/{nome}/check-runs", status_code=201)
+        async def criar_check(dono: str, nome: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            corpo = await request.json()
+            self.check_runs.append(corpo)
+            return {"id": len(self.check_runs)}
+
+        @app.get("/repos/{dono}/{nome}/commits/{sha}/check-runs")
+        async def checks(dono: str, nome: str, sha: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            return {"check_runs": [c for c in self.check_runs if c["head_sha"] == sha]}
+
+        @app.get("/repos/{dono}/{nome}/pulls/{numero}")
+        async def pr(dono: str, nome: str, numero: int) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            return {"number": numero, "node_id": f"PR_{numero}"}
+
+        @app.post("/graphql")
+        async def graphql(request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            corpo = await request.json()
+            self.prontos.append(corpo["variables"]["id"])
+            return {"data": {"markPullRequestReadyForReview": {"clientMutationId": None}}}
+
+        @app.put("/repos/{dono}/{nome}/pulls/{numero}/merge")
+        async def mesclar(dono: str, nome: str, numero: int, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            self.merges.append({"numero": numero, **(await request.json())})
+            return {"merged": True}
 
         return app

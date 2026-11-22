@@ -10,9 +10,13 @@ from typing import Protocol
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from forja.application.casos_de_uso.revisao import RevisarEntrega
 from forja.application.portas.agente import UsoModelo
 from forja.application.portas.harness import ContextoDaEntrega, Harness
 from forja.application.portas.publicador import DestinoDaEntrega, PublicadorDeEntrega
+from forja.application.portas.revisao import EscritaDeRevisao, LeituraDeRevisao
+from forja.domain.politica import Tier
+from forja.domain.revisao import REVISORES, Achado, Severidade
 from forja.infrastructure.github.cliente import nome_da_branch
 from forja.infrastructure.telemetry.metricas import MetricasForja
 
@@ -80,9 +84,57 @@ class HarnessSaida:
     funcionalidades: int = 0
     feedback: str = ""
     violacoes: int = 0
+    sessoes: int = 0
     tokens_entrada: int = 0
     tokens_saida: int = 0
     custo_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class AchadoDto:
+    revisor: str
+    severidade: str
+    mensagem: str
+    arquivo: str = ""
+    linha: int = 0
+    risco: int = 1
+
+
+@dataclass(frozen=True)
+class PoliticaDto:
+    por_intent_usd: float = 0.0  # 0 = sem teto
+    max_sessoes: int = 0
+    declarada: bool = False
+
+
+@dataclass(frozen=True)
+class RevisaoEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    artefatos: dict[str, str] = field(default_factory=dict[str, str])
+    labels: list[str] = field(default_factory=list[str])
+    numero: int = 0
+
+
+@dataclass(frozen=True)
+class RevisaoSaida:
+    tier: int = 3
+    motivos: list[str] = field(default_factory=list[str])
+    achados: list[AchadoDto] = field(default_factory=list[AchadoDto])
+    review_md: str = ""
+    resumos: dict[str, str] = field(default_factory=dict[str, str])
+    tokens_entrada: int = 0
+    tokens_saida: int = 0
+    custo_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class DeployEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    branch_pronta: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,7 +150,9 @@ class ExecutorDeEtapa(Protocol):
     async def __call__(self, entrada: EtapaEntrada) -> EtapaSaida: ...
 
 
-DESFECHOS_CONCLUIDOS = frozenset({"concluida", "artefatos_publicados", "verificada", "aprovada"})
+DESFECHOS_CONCLUIDOS = frozenset(
+    {"concluida", "artefatos_publicados", "verificada", "aprovada", "mesclada"}
+)
 
 
 class DeliveryActivities:
@@ -111,7 +165,13 @@ class DeliveryActivities:
         publicador: PublicadorDeEntrega | None = None,
         metricas: MetricasForja | None = None,
         harness: Harness | None = None,
+        revisor: RevisarEntrega | None = None,
+        leitura: LeituraDeRevisao | None = None,
+        escrita: EscritaDeRevisao | None = None,
     ) -> None:
+        self._revisor = revisor
+        self._leitura = leitura
+        self._escrita = escrita
         self._harness_impl = harness
         self._executor = executor
         self._intervalo = intervalo_heartbeat_s
@@ -162,6 +222,125 @@ class DeliveryActivities:
     async def abrir_pr(self, entrada: PrEntrada) -> str:
         destino = DestinoDaEntrega(entrada.repositorio, entrada.intent_id, entrada.slug)
         return await self._pub().abrir_pr(destino, entrada.titulo, entrada.corpo)
+
+    # --- revisão e deploy (M5) ---------------------------------------------------------
+
+    def _revisao(self) -> RevisarEntrega:
+        if self._revisor is None:
+            raise ApplicationError("revisão não configurada", non_retryable=True)
+        return self._revisor
+
+    def _leit(self) -> LeituraDeRevisao:
+        if self._leitura is None:
+            raise ApplicationError("leitura de revisão não configurada", non_retryable=True)
+        return self._leitura
+
+    def _escr(self) -> EscritaDeRevisao:
+        if self._escrita is None:
+            raise ApplicationError("escrita de revisão não configurada", non_retryable=True)
+        return self._escrita
+
+    @activity.defn(name="carregar_politica")
+    async def carregar_politica(self, repositorio: str) -> PoliticaDto:
+        if self._leitura is None:
+            return PoliticaDto()
+        p = await self._leitura.politica(repositorio)
+        o = p.orcamento
+        return PoliticaDto(o.por_intent_usd or 0.0, o.max_sessoes_por_intent or 0, p.declarada)
+
+    @activity.defn(name="revisar")
+    async def revisar(self, e: RevisaoEntrada) -> RevisaoSaida:
+        revisor = self._revisao()
+        politica = await self._leit().politica(e.repositorio)
+        feita = await self._com_heartbeat(
+            revisor.executar(
+                e.repositorio,
+                nome_da_branch(e.intent_id, e.slug),
+                e.artefatos.get("intent.md", ""),
+                e.artefatos.get("spec.md", ""),
+                e.labels,
+                politica,
+            ),
+            "revisar",
+        )
+        self._medir_uso(feita.uso)
+        r = feita.resultado
+        return RevisaoSaida(
+            tier=int(r.tier),
+            motivos=list(r.classificacao.motivos),
+            achados=[
+                AchadoDto(
+                    a.revisor,
+                    a.severidade.value,
+                    a.mensagem,
+                    a.arquivo or "",
+                    a.linha or 0,
+                    int(a.risco),
+                )
+                for a in r.achados
+            ],
+            review_md=feita.review_md,
+            tokens_entrada=feita.uso.tokens_entrada,
+            tokens_saida=feita.uso.tokens_saida,
+            custo_usd=feita.uso.custo_usd,
+        )
+
+    @activity.defn(name="publicar_checks")
+    async def publicar_checks(self, e: RevisaoEntrada, achados: list[AchadoDto]) -> str:
+        """Um check run por revisor, no commit atual da branch (depois do review.md)."""
+        self._revisao()
+        diff = await self._leit().diff_da_entrega(
+            e.repositorio, nome_da_branch(e.intent_id, e.slug)
+        )
+        concluidos: list[str] = []
+        for nome in REVISORES:
+            dos_dele = tuple(
+                Achado(
+                    a.revisor,
+                    Severidade(a.severidade),
+                    a.mensagem,
+                    a.arquivo or None,
+                    a.linha or None,
+                    Tier(a.risco),
+                )
+                for a in achados
+                if a.revisor == nome
+            )
+            concluidos.append(
+                await self._escr().check_run(
+                    e.repositorio,
+                    diff.head_sha,
+                    nome,
+                    dos_dele,
+                    f"{len(dos_dele)} achado(s)",
+                    e.intent_id,
+                )
+            )
+        return ",".join(concluidos)
+
+    @activity.defn(name="estado_dos_checks")
+    async def estado_dos_checks(self, e: DeployEntrada) -> str:
+        diff = await self._leit().diff_da_entrega(
+            e.repositorio, nome_da_branch(e.intent_id, e.slug)
+        )
+        return await self._leit().estado_dos_checks(e.repositorio, diff.head_sha)
+
+    @activity.defn(name="marcar_pronto")
+    async def marcar_pronto(self, e: DeployEntrada) -> str:
+        numero = await self._leit().numero_do_pr(e.repositorio, nome_da_branch(e.intent_id, e.slug))
+        if numero is None:
+            return "sem_pr"
+        return await self._escr().marcar_pr_pronto(e.repositorio, numero, e.intent_id)
+
+    @activity.defn(name="mesclar")
+    async def mesclar(self, e: DeployEntrada) -> str:
+        branch = nome_da_branch(e.intent_id, e.slug)
+        numero = await self._leit().numero_do_pr(e.repositorio, branch)
+        if numero is None:
+            return "sem_pr"
+        diff = await self._leit().diff_da_entrega(e.repositorio, branch)
+        await self._escr().marcar_pr_pronto(e.repositorio, numero, e.intent_id)
+        return await self._escr().mesclar_pr(e.repositorio, numero, diff.head_sha, e.intent_id)
 
     @activity.defn(name="registrar_desfecho")
     async def registrar_desfecho(self, desfecho: str) -> None:
@@ -231,6 +410,7 @@ class DeliveryActivities:
         )
         self._medir_uso(r.uso)
         return HarnessSaida(
+            sessoes=r.sessoes,
             aprovadas=list(r.aprovadas),
             reprovadas=list(r.reprovadas),
             aprovado_pelo_avaliador=r.aprovado_pelo_avaliador,
