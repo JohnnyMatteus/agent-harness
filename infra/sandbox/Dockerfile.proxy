@@ -2,5 +2,9 @@ FROM debian:12.8-slim
 RUN apt-get update && apt-get install -y --no-install-recommends squid \
     && rm -rf /var/lib/apt/lists/*
 COPY squid.conf /etc/squid/squid.conf
+# O Squid larga privilégio e vira `proxy`: não consegue abrir /dev/stdout (pipe do root) e cai
+# na partida. O log vai para arquivo do próprio `proxy` e um `tail` root o repassa ao stdout.
+RUN sed -i 's#stdio:/dev/stdout#stdio:/var/log/squid/access.log#' /etc/squid/squid.conf \
+    && grep -q 'access.log' /etc/squid/squid.conf
 EXPOSE 3128
-CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]
+CMD ["sh", "-c", "touch /var/log/squid/access.log && chown proxy:proxy /var/log/squid/access.log && (tail -F /var/log/squid/access.log &) && exec squid -N -d 1 -f /etc/squid/squid.conf"]
