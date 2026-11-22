@@ -1,0 +1,11 @@
+{
+  "token": "ghs_TOKEN_FICTICIO_DE_TESTE",
+  "expires_at": "2026-11-21T13:00:00Z",
+  "permissions": {
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "checks": "write",
+    "metadata": "read"
+  }
+}

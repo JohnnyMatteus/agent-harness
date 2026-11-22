@@ -66,3 +66,7 @@ def test_origem_sem_titulo_falha() -> None:
 def test_criterio_de_sucesso_vazio_falha() -> None:
     with pytest.raises(IntentInvalida):
         Intent.receber(origem(), ("ok", " "))
+
+
+def test_chave_da_origem_github_coincide_com_a_referencia_do_gateway() -> None:
+    assert origem("42", "acme/loja").chave == "github:acme/loja#42"

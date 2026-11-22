@@ -1,0 +1,16 @@
+{
+  "zen": "Keep it logically awesome.",
+  "hook_id": 1,
+  "repository": {
+    "id": 1,
+    "name": "loja-exemplo",
+    "full_name": "acme-demo/loja-exemplo",
+    "private": true,
+    "default_branch": "main",
+    "owner": {
+      "login": "acme-demo",
+      "id": 2,
+      "type": "Organization"
+    }
+  }
+}
