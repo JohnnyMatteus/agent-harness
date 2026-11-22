@@ -99,6 +99,12 @@ async def test_do_webhook_ao_pr_verificado_com_git_real(amb_h: Ambiente) -> None
     m: Montagem = amb_h.montagem  # type: ignore[attr-defined]
     await _ate_o_build(amb_h, "h1")
     await esperar(lambda: len(amb_h.github.prs) == 1, 60)
+    # O PR abre ANTES do comentário final e do registro do desfecho (a última activity do
+    # workflow): quem confere isso precisa esperar a condição, não o PR.
+    await esperar(lambda: any("Verificação verde" in c for c in amb_h.comentarios()), 60)
+    await esperar(
+        lambda: "forja_entregas_concluidas_total 1.0" in amb_h.metricas.exportar().decode(), 60
+    )
 
     lista = FeatureList.de_json(m.na_branch(f".forja/{ID}/feature_list.json"))
     assert [f.passes for f in lista.features] == [True, True]
