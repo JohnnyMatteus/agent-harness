@@ -22,6 +22,11 @@ from forja.application.portas.entregas import ResultadoInicio
 from forja.domain.intent import Origem, TipoDeOrigem, intent_id_de
 from forja.infrastructure.github.cliente import slugificar
 from forja.infrastructure.temporal.activities import DeliveryActivities
+from forja.infrastructure.temporal.operacao import (
+    AtividadesDeOperacao,
+    IncidentWorkflow,
+    MonitorDeBandas,
+)
 from forja.infrastructure.temporal.workflows import (
     DeliveryEntrada,
     DeliverySaida,
@@ -39,13 +44,16 @@ def criar_worker(
     task_queue: str = FILA_PADRAO,
     interceptors: Sequence[Interceptor] = (),
     max_cached_workflows: int = 1000,
+    operacao: AtividadesDeOperacao | None = None,
 ) -> Worker:
     ativ = activities
+    extras = [operacao.checar_bandas, operacao.diagnosticar_e_abrir] if operacao else []
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[DeliveryWorkflow],
+        workflows=[DeliveryWorkflow, MonitorDeBandas, IncidentWorkflow],
         activities=[
+            *extras,
             ativ.executar_etapa,
             ativ.publicar_comentario,
             ativ.commitar_artefato,
@@ -161,3 +169,36 @@ class TemporalEntregaGateway:
             await self._client.get_workflow_handle(wf.id).signal(DeliveryWorkflow.parar)
             total += 1
         return total
+
+
+def id_do_monitor(repositorio: str) -> str:
+    return "monitor-" + repositorio.replace("/", "__")
+
+
+async def iniciar_monitores(
+    client: Client,
+    repositorios: Sequence[str],
+    intervalo_s: float = 300.0,
+    task_queue: str = FILA_PADRAO,
+) -> list[str]:
+    """Inicia o `MonitorDeBandas` de cada repositório (id fixo: rodar de novo não duplica).
+    Só lê métricas e abre issue de incidente (dry-run por padrão); não age sobre o sistema."""
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    from forja.domain.seguranca import repositorio_valido
+    from forja.infrastructure.temporal.operacao import MonitorEntrada
+
+    ids: list[str] = []
+    for repo in repositorios:
+        if not repositorio_valido(repo):
+            raise ValueError(f"repositório inválido: {repo[:40]!r}")
+        wid = id_do_monitor(repo)
+        await client.start_workflow(
+            MonitorDeBandas.run,
+            MonitorEntrada(repo, intervalo_s),
+            id=wid,
+            task_queue=task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+        ids.append(wid)
+    return ids

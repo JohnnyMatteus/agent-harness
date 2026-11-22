@@ -182,6 +182,11 @@ class ClienteDeRevisaoGravador:
     async def mesclar_pr(self, repositorio, numero, sha):
         self.merges.append((numero, sha))
 
+    async def criar_issue(self, repositorio, titulo, corpo, rotulos):
+        self.issues = getattr(self, "issues", [])
+        self.issues.append((titulo, corpo, rotulos))
+        return "https://github.test/issues/1"
+
 
 def _publicador_de_revisao(dry_run=False):
     cliente = ClienteDeRevisaoGravador()
@@ -241,3 +246,18 @@ async def test_merge_e_pr_pronto_so_com_destino_valido_idempotentes_e_em_dry_run
     assert await seco.marcar_pr_pronto("a/b", 7, "k") == "dry_run"
     assert await seco.check_run("a/b", SHA, "x", [], "r", "k") == "dry_run"
     assert (cliente2.merges, cliente2.prontos, cliente2.checks) == ([], [], [])
+
+
+async def test_incidente_abre_issue_com_label_de_incidente_uma_vez_e_em_dry_run_nao_abre() -> None:
+    pub, cliente = _publicador_de_revisao()
+    url = await pub.abrir("a/b", "Incidente @dono ![](https://evil/?d=1)", "corpo @x", "k1")
+    assert url == "https://github.test/issues/1" and len(cliente.issues) == 1
+    titulo, corpo, rotulos = cliente.issues[0]
+    assert rotulos == ["forja:incident"]  # nunca forja:intent: quem aplica é um humano
+    assert "://" not in titulo and "@dono" not in titulo and "@x" not in corpo
+    assert "ja_aberta" in await pub.abrir("a/b", "t", "c", "k1")  # a mesma chave não duplica
+    assert len(cliente.issues) == 1
+    seco, c2 = _publicador_de_revisao(dry_run=True)
+    assert await seco.abrir("a/b", "t", "c", "k") == "dry-run" and not hasattr(c2, "issues")
+    with pytest.raises(ValueError, match="inválido"):
+        await pub.abrir("../x", "t", "c", "k2")

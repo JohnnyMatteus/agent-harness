@@ -60,7 +60,16 @@ class Ajustes(BaseSettings):
     tamanho_do_bloco: int = Field(3, validation_alias="FORJA_TAMANHO_DO_BLOCO")
     modelo: str | None = Field(None, validation_alias="FORJA_MODELO")
 
-    @field_validator("repos_habilitados", "automerge_repos", mode="before")
+    # Maintain (M6): desligado sem configuração explícita. Repositórios monitorados, URL do
+    # Prometheus e diretório das bandas são do OPERADOR; nada disso vem do repositório-alvo.
+    monitor_repos: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, validation_alias="FORJA_MONITOR_REPOS"
+    )
+    prometheus_url: str | None = Field(None, validation_alias="FORJA_PROMETHEUS_URL")
+    bandas_dir: Path | None = Field(None, validation_alias="FORJA_BANDAS_DIR")
+    monitor_intervalo_s: float = Field(300.0, validation_alias="FORJA_MONITOR_INTERVALO_S")
+
+    @field_validator("repos_habilitados", "automerge_repos", "monitor_repos", mode="before")
     @classmethod
     def _lista(cls, v: object) -> object:
         if isinstance(v, str):

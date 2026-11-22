@@ -176,6 +176,26 @@ class GitHubCliente:
             int(c.get("total_commits", len(c.get("commits", [])))), tuple(arquivos)
         )
 
+    async def deploys_recentes(self, repositorio: str) -> list[str]:
+        """Últimos commits da branch padrão (sha, data, assunto): o que mudou antes."""
+        commits = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/commits?per_page=15"
+        )
+        return [
+            f"{c['sha'][:10]} {c['commit']['author']['date']} "
+            f"{c['commit']['message'].splitlines()[0][:120]}"
+            for c in commits
+        ]
+
+    async def criar_issue(
+        self, repositorio: str, titulo: str, corpo: str, rotulos: list[str]
+    ) -> str:
+        issue = await self._chamar(
+            "POST", repositorio, f"/repos/{repositorio}/issues",
+            {"title": titulo[:200], "body": corpo, "labels": rotulos},
+        )  # fmt: skip
+        return str(issue["html_url"])
+
     async def branch_padrao(self, repositorio: str) -> str:
         return str(
             (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]

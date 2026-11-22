@@ -19,6 +19,7 @@ from forja.domain.artefatos import (
     linha_unica,
     sanear_mensagem_de_commit,
 )
+from forja.domain.incidente import ROTULO_DO_INCIDENTE
 from forja.domain.revisao import Achado, Severidade
 from forja.domain.seguranca import neutralizar_texto, repositorio_valido
 from forja.infrastructure.github.cliente import nome_da_branch
@@ -226,3 +227,26 @@ class PublicadorGitHub:
             f"{chave}:merge:{numero}:{sha}",
             lambda: self._cliente().mesclar_pr(repositorio, numero, sha),
         )
+
+    async def abrir(self, repositorio: str, titulo: str, corpo: str, chave: str) -> str:
+        """Issue do incidente, uma vez por `chave`, com o label `forja:incident` (nunca
+        `forja:intent`: quem aplica este é um humano, no portão). Dry-run por padrão."""
+        if not repositorio_valido(repositorio):
+            raise ValueError("destino inválido")
+        if self._dry_run:
+            log.info("dry-run: issue de incidente não aberta", extra={"chave": chave})
+            return "dry-run"
+        url: list[str] = []
+
+        async def abrir() -> None:
+            url.append(
+                await self._cliente().criar_issue(
+                    repositorio,
+                    linha_unica(neutralizar_texto(titulo, 150), 150),
+                    neutralizar_texto(corpo, 8000),
+                    [ROTULO_DO_INCIDENTE],
+                )
+            )
+
+        resultado = await self._uma_vez(f"incidente:{chave}", abrir)
+        return url[0] if url else f"ja_aberta ({resultado})"
