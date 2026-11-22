@@ -18,10 +18,9 @@
 - Check "verde" só com tudo concluído em `success`, `neutral` ou `skipped` (`startup_failure`, `stale` e conclusões desconhecidas falham), lendo todas as páginas (`total_count` maior que o lido é pendente) e os commit statuses (também paginados, com o `state` combinado e o `total_count`: failure ou error falham, status não lido por inteiro é pendente, e um combinado `pending` sem nenhum status não trava quem só usa check runs), e com ao menos um check externo (nome fora de `forja/`) ou status em sucesso: os check runs da própria Forja não provam nada sobre o CI do repositório. Sem check externo, não há auto-merge: a entrega vai para o portão humano.
 - Diff incompleto: lista de arquivos no teto do compare é risco alto; patch truncado (8 000 caracteres por arquivo), arquivo sem patch (binário ou grande demais; só o rename puro escapa, porque os dois caminhos já são classificados), ou diff acima de 60 000 caracteres no prompt marcam a revisão como incompleta: no mínimo médio, logo nunca auto-merge, com o motivo no review.md.
 - `carregar_politica` sem leitura configurada falha (não retentável) em vez de assumir orçamento ilimitado.
+- O avanço da branch também conta a origem de um rename (`previous_filename`), então renomear de outro lugar para o `review.md` não passa por "só o review". `numero_do_pr` exige PR aberto com destino na branch padrão, e um `marcar_pronto` sem PR falha a entrega em vez de comentar "PR pronto".
 
 ## Limitações
 
 - Auto-merge nunca rodou contra o GitHub real; os testes usam GitHub falso. CODEOWNERS e branch protection são respeitados só porque o merge falha se o GitHub recusar.
 - A revisão é em um passo (sem rodar scanners externos nem testes de revisão no sandbox).
-
-- O avanço da branch também conta a origem de um rename (`previous_filename`), então renomear de outro lugar para o `review.md` não passa por "só o review". `numero_do_pr` exige PR aberto com destino na branch padrão, e um `marcar_pronto` sem PR falha a entrega em vez de comentar "PR pronto".
