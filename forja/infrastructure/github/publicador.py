@@ -14,6 +14,7 @@ from forja.domain.artefatos import (
     caminho_do_artefato,
     intent_id_valido,
     linha_unica,
+    sanear_mensagem_de_commit,
 )
 from forja.domain.seguranca import neutralizar_texto, repositorio_valido
 from forja.infrastructure.github.cliente import nome_da_branch
@@ -82,7 +83,7 @@ class PublicadorGitHub:
         try:
             await self._github.criar_branch(destino.repositorio, destino.intent_id, destino.slug)
             await self._github.commitar_arquivo(
-                destino.repositorio, branch, caminho, conteudo, linha_unica(mensagem, 2000)
+                destino.repositorio, branch, caminho, conteudo, sanear_mensagem_de_commit(mensagem)
             )
         except BaseException:
             await self._registro.liberar(chave)
@@ -91,16 +92,14 @@ class PublicadorGitHub:
         return "publicado"
 
     async def ler_artefato(self, destino: DestinoDaEntrega, nome: str) -> str | None:
-        """Versão da branch (pode ter sido editada por um humano); None sem branch ou em dry-run."""
+        """Versão da branch (pode ter sido editada por um humano); None só se não existe (ou
+        em dry-run)."""
         branch = self._branch(destino)
         if self._dry_run:
             return None
         caminho = caminho_do_artefato(destino.intent_id, nome)
-        try:
-            return await self._github.ler_arquivo(destino.repositorio, branch, caminho)
-        except Exception:
-            log.warning("não foi possível ler o artefato da branch", extra={"caminho": caminho})
-            return None
+        # Falha fechada: só a ausência (None) é ausência; erro do GitHub sobe e o Temporal retenta.
+        return await self._github.ler_arquivo(destino.repositorio, branch, caminho)
 
     async def abrir_pr(self, destino: DestinoDaEntrega, titulo: str, corpo: str) -> str:
         branch = self._branch(destino)

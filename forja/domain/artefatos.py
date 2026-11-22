@@ -64,6 +64,19 @@ def linha_unica(texto: str, limite: int = 500) -> str:
     return _CONTROLE.sub(" ", texto).replace("```", "'''").strip()[:limite]
 
 
+TETO_DE_ARTEFATO = 200_000
+
+
+def sanear_mensagem_de_commit(mensagem: str) -> str:
+    """Assunto numa linha só; o corpo (trailers Intent-Id, Run-Id...) mantém uma linha por item,
+    cada uma saneada. Achatar tudo em uma linha desfaria os trailers."""
+    assunto, *corpo = mensagem.split("\n")  # splitlines() também quebra em U+2028 e afins
+    linhas = [linha_unica(assunto, 100)]
+    if corpo:
+        linhas += [linha_unica(c, 200) for c in corpo[:30]]
+    return "\n".join(linhas)
+
+
 @dataclass(frozen=True, slots=True)
 class Fonte:
     """Citação obrigatória (seção 6.3): de onde vem uma afirmação do RAG."""

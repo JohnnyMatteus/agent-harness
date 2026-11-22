@@ -72,3 +72,16 @@ def test_texto_de_modelo_nao_abre_titulo_nem_bloco() -> None:
 def test_intent_md_traz_problema_origem_e_criterios() -> None:
     md = IntentMd("Login falha", ("passa o teste",), "github:a/b#1", "https://x/1").renderizar()
     assert "Login falha" in md and "- passa o teste" in md and "github:a/b#1" in md
+
+
+def test_mensagem_de_commit_mantem_os_trailers_e_saneia_so_cada_linha() -> None:
+    from forja.domain.artefatos import sanear_mensagem_de_commit
+
+    bruta = (
+        f"forja(plan): x{chr(0x2028)}y\n\nIntent-Id: {ID}\nRun-Id: r1\nCo-Authored-By: Forja <f@x>"
+    )
+    saida = sanear_mensagem_de_commit(bruta)
+    assert saida.splitlines() == [
+        "forja(plan): x y", "", f"Intent-Id: {ID}", "Run-Id: r1", "Co-Authored-By: Forja <f@x>",
+    ]  # fmt: skip
+    assert len(sanear_mensagem_de_commit("a" * 500).splitlines()[0]) == 100

@@ -56,6 +56,8 @@ class DeliveryEntrada:
     corpo: str = ""
     url: str = ""
     slug: str = "intent"
+    # Quem pediu (logins em minúsculas): só eles confirmam o intent. Vazio não restringe.
+    solicitantes: list[str] = field(default_factory=list[str])
 
 
 @dataclass
@@ -68,6 +70,7 @@ class DeliverySaida:
     sinais_repetidos: int = 0
     pr_url: str = ""
     motivo_da_rejeicao: str = ""
+    custo_usd: float = 0.0
 
 
 def workflow_id(intent_id: str) -> str:
@@ -79,7 +82,6 @@ def workflow_id(intent_id: str) -> str:
 class DeliveryWorkflow:
     def __init__(self) -> None:
         self._entrega: Entrega | None = None
-        self._confirmado = False
         self._parar = False
         self._lembretes = 0
         self._repetidos = 0
@@ -89,21 +91,31 @@ class DeliveryWorkflow:
         self._decisao: tuple[str, str, str] | None = None
         self._pr_url = ""
         self._motivo = ""
+        self._solicitantes: frozenset[str] = frozenset()
+        self._custo = 0.0
 
     @workflow.signal
     def confirmar(self, quem: str = "") -> None:
-        self._confirmado = True
+        """Só vale no portão do intent, de quem pediu. Confirmação antecipada (antes de o resumo
+        existir) é descartada: ninguém confirma o que ainda não viu."""
+        if self._portao == "intent" and self._decisao is None and self._pediu(quem):
+            self._decisao = ("aprovada", quem, "")
+        else:
+            workflow.logger.info("confirmação descartada (sem portão aberto ou não solicitante)")
 
     @workflow.signal
     def aprovar(self, quem: str = "") -> None:
-        """Só vale com um portão aberto: aprovação antecipada é descartada, não guardada."""
-        if self._portao is not None and self._decisao is None:
+        """Só vale num portão de decisão aberto: aprovação antecipada é descartada."""
+        if self._portao not in (None, "intent") and self._decisao is None:
             self._decisao = ("aprovada", quem, "")
 
     @workflow.signal
     def rejeitar(self, quem: str = "", motivo: str = "") -> None:
         if self._portao is not None and self._decisao is None:
             self._decisao = ("rejeitada", quem, motivo[:LIMITE_MOTIVO])
+
+    def _pediu(self, quem: str) -> bool:
+        return not self._solicitantes or quem.lower() in self._solicitantes
 
     @workflow.signal
     def parar(self) -> None:
@@ -159,20 +171,29 @@ class DeliveryWorkflow:
             sinais_repetidos=self._repetidos,
             pr_url=self._pr_url,
             motivo_da_rejeicao=self._motivo,
+            custo_usd=self._custo,
         )
 
     async def _percorrer(self, entrada: DeliveryEntrada) -> Desfecho:
         entrega = self._entrega = Entrega(intent_id=entrada.intent_id)
+        self._solicitantes = frozenset(s.lower() for s in entrada.solicitantes)
 
         plan = await self._executar(entrada, "plan")  # Intérprete
         self._artefatos["intent.md"] = plan.texto
         await self._commitar(entrada, "intent.md", "plan")
+        self._abrir_portao("intent")
         await self._comentar(
             entrada,
             "intent",
-            f"Resumo da intenção. Responda `/forja confirm` para seguir.\n\n{plan.texto}",
+            "Resumo da intenção. Quem pediu responde `/forja confirm` para seguir (pode editar "
+            f"`intent.md` na branch antes: a versão confirmada é a que vale).\n\n{plan.texto}",
         )
-        await self._aguardar(lambda: self._confirmado, entrada, "confirmação do intent")
+        decisao, quem, motivo = await self._esperar_decisao(entrada, "confirmação do intent")
+        if decisao == "rejeitada":
+            return await self._encerrar_rejeitado(entrada, "intent", quem, motivo)
+        editado = await self._ler(entrada, "intent.md")
+        if editado:
+            self._artefatos["intent.md"] = editado
         entrega.confirmar_intent()
 
         design = await self._executar(entrada, "design")  # Spec
@@ -180,6 +201,7 @@ class DeliveryWorkflow:
         await self._commitar(entrada, "spec.md", "design")
         entrega.concluir_spec(design.pontos_em_aberto)
         if entrega.estado is Estado.AGUARDANDO_SPEC:
+            self._abrir_portao("spec")
             await self._comentar(
                 entrada,
                 "spec",
@@ -187,13 +209,9 @@ class DeliveryWorkflow:
                 "branch se precisar e responda `/forja approve` ou `/forja reject <motivo>`."
                 f"\n\n{design.texto}",
             )
-            decisao, quem, motivo = await self._portao_humano(entrada, "spec")
+            decisao, quem, motivo = await self._esperar_decisao(entrada, "decisão do portão spec")
             if decisao == "rejeitada":
-                self._motivo = motivo
-                await self._comentar(
-                    entrada, "spec-rejeitada", f"Entrega encerrada: spec rejeitada por {quem}."
-                )
-                return Desfecho.REJEITADA
+                return await self._encerrar_rejeitado(entrada, "spec", quem, motivo)
             editada = await self._ler(entrada, "spec.md")
             if editada:
                 self._artefatos["spec.md"] = editada
@@ -208,14 +226,24 @@ class DeliveryWorkflow:
 
     # --- portões -----------------------------------------------------------------------
 
-    async def _portao_humano(self, entrada: DeliveryEntrada, nome: str) -> tuple[str, str, str]:
+    def _abrir_portao(self, nome: str) -> None:
+        """Abre o portão antes de avisar o humano: nenhuma resposta chega antes dele."""
         self._portao, self._decisao = nome, None
-        await self._aguardar(
-            lambda: self._decisao is not None, entrada, f"decisão do portão {nome}"
-        )
+
+    async def _esperar_decisao(self, entrada: DeliveryEntrada, o_que: str) -> tuple[str, str, str]:
+        await self._aguardar(lambda: self._decisao is not None, entrada, o_que)
         decisao = self._decisao or ("rejeitada", "", "")
         self._portao = None
         return decisao
+
+    async def _encerrar_rejeitado(
+        self, entrada: DeliveryEntrada, onde: str, quem: str, motivo: str
+    ) -> Desfecho:
+        self._motivo = motivo
+        await self._comentar(
+            entrada, f"{onde}-rejeitada", f"Entrega encerrada: {onde} rejeitada por {quem}."
+        )
+        return Desfecho.REJEITADA
 
     async def _aguardar(
         self, condicao: Callable[[], bool], entrada: DeliveryEntrada, o_que: str
@@ -254,6 +282,7 @@ class DeliveryWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=NAO_REPETIR),
         )
         self._executadas.append(saida.etapa)
+        self._custo += saida.custo_usd
         return saida
 
     def _artefato(
@@ -281,7 +310,7 @@ class DeliveryWorkflow:
             self._artefato(entrada, nome),
             result_type=str,
             start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
         )
 
     async def _abrir_pr(self, entrada: DeliveryEntrada) -> str:

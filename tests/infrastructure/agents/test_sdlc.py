@@ -128,3 +128,18 @@ async def test_listador_git_devolve_so_caminhos_seguros(tmp_path: Path) -> None:
     arquivos = await ListadorGit(RepositoriosLocais(tmp_path)).listar("acme/loja")
     assert arquivos == ("a.py",)
     assert asyncio.iscoroutinefunction(ListadorGit.listar)
+
+
+async def test_executor_leva_tokens_e_custo_das_sessoes_para_a_saida() -> None:
+    from forja.application.portas.agente import UsoModelo
+    from forja.application.portas.sdlc import Resultado
+    from forja.domain.artefatos import IntentMd
+
+    class Interprete:
+        async def interpretar(self, pedido):
+            return Resultado(IntentMd("p", (), "o"), UsoModelo(11, 7, 0.25))
+
+    saida = await ExecutorSdlc(Interprete(), None, None)(  # type: ignore[arg-type]
+        EtapaEntrada("i", "plan", repositorio="a/b")
+    )
+    assert (saida.tokens_entrada, saida.tokens_saida, saida.custo_usd) == (11, 7, 0.25)

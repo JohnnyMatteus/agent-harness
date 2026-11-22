@@ -45,6 +45,7 @@ class _Issue(_Modelo):
     body: str | None = None
     html_url: str
     pull_request: dict[str, Any] | None = None
+    user: _Usuario | None = None
 
 
 class _Label(_Modelo):
@@ -97,6 +98,7 @@ def _traduzir_issue(payload: dict[str, Any]) -> Traducao:
         titulo=evento.issue.title,
         corpo=evento.issue.body or "",
         autor=evento.sender.login,
+        autor_da_issue=evento.issue.user.login if evento.issue.user else "",
     )
 
 

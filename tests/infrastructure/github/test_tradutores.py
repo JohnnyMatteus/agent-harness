@@ -88,3 +88,13 @@ def test_comando_citado_ou_de_bot_nao_conta(fixture_json: Callable[[str], Any]) 
     assert isinstance(
         traduzir("issue_comment", _comentario(fixture_json, "vou /forja approve depois")), Ignorado
     )
+
+
+def test_criar_intent_traz_o_autor_da_issue_alem_de_quem_rotulou(
+    fixture_json: Callable[[str], Any],
+) -> None:
+    dados = fixture_json("issues_labeled_forja_intent")
+    dados["sender"]["login"] = "quem-rotulou"
+    resultado = traduzir("issues", dados)
+    assert isinstance(resultado, CriarIntent)
+    assert (resultado.autor, resultado.autor_da_issue) == ("quem-rotulou", "maria-dev")

@@ -139,3 +139,29 @@ async def test_destino_invalido_e_recusado() -> None:
         await pub.abrir_pr(DestinoDaEntrega("../x", ID, "s"), "t", "c")
     with pytest.raises(ValueError, match="inválido"):
         await pub.abrir_pr(DestinoDaEntrega("a/b", "../../x", "s"), "t", "c")
+
+
+async def test_commit_leva_trailers_em_linhas_proprias() -> None:
+    capturadas: list[str] = []
+
+    class Gravador(GitHubGravador):
+        async def commitar_arquivo(self, repositorio, branch, caminho, conteudo, mensagem):
+            capturadas.append(mensagem)
+            return True
+
+    pub = PublicadorGitHub(Gravador(), IdempotenciaRedis(fakeredis.FakeAsyncRedis()), dry_run=False)
+    await pub.commitar_artefato(
+        destino(), "intent.md", "x", f"forja(plan): intent.md\n\nIntent-Id: {ID}\nRun-Id: r"
+    )
+    assert capturadas == [f"forja(plan): intent.md\n\nIntent-Id: {ID}\nRun-Id: r"]
+
+
+async def test_erro_ao_ler_artefato_sobe_em_vez_de_virar_ausencia() -> None:
+    class Quebrado(GitHubGravador):
+        async def ler_arquivo(self, repositorio, branch, caminho):
+            raise RuntimeError("github 500")
+
+    pub = PublicadorGitHub(Quebrado(), IdempotenciaRedis(fakeredis.FakeAsyncRedis()), dry_run=False)
+    with pytest.raises(RuntimeError, match="500"):
+        await pub.ler_artefato(destino(), "spec.md")
+    assert await montar()[2].ler_artefato(destino(), "spec.md") is None  # ausente é None

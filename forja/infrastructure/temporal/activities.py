@@ -33,6 +33,9 @@ class EtapaSaida:
     resumo: str = ""
     texto: str = ""
     pontos_em_aberto: int = 0
+    tokens_entrada: int = 0
+    tokens_saida: int = 0
+    custo_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,12 @@ class DeliveryActivities:
         self._intervalo = intervalo_heartbeat_s
         self._publicador = publicador
         self._metricas = metricas
+
+    def _medir(self, saida: EtapaSaida) -> None:
+        if self._metricas is not None:
+            self._metricas.custo_usd.inc(saida.custo_usd)
+            self._metricas.tokens.labels("entrada").inc(saida.tokens_entrada)
+            self._metricas.tokens.labels("saida").inc(saida.tokens_saida)
 
     def _pub(self) -> PublicadorDeEntrega:
         if self._publicador is None:
@@ -139,7 +148,9 @@ class DeliveryActivities:
                 activity.heartbeat(entrada.etapa)
                 feito, _ = await asyncio.wait({trabalho}, timeout=self._intervalo)
                 if feito:
-                    return trabalho.result()
+                    saida = trabalho.result()
+                    self._medir(saida)
+                    return saida
         finally:
             if not trabalho.done():
                 trabalho.cancel()

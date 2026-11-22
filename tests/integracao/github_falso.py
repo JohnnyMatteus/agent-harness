@@ -17,6 +17,7 @@ class GitHubFalso:
         self.arquivos: dict[tuple[str, str], dict[str, str]] = {}
         self.commits: list[dict[str, Any]] = []
         self.prs: list[dict[str, Any]] = []
+        self.falhar_leitura = False
         self.app = self._criar_app()
 
     def arquivo(self, branch: str, caminho: str) -> str:
@@ -77,6 +78,8 @@ class GitHubFalso:
 
         @app.get("/repos/{dono}/{nome}/contents/{caminho:path}")
         async def ler(dono: str, nome: str, caminho: str, ref: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+            if self.falhar_leitura:
+                raise HTTPException(500)
             achado = self.arquivos.get((ref, caminho))
             if achado is None:
                 raise HTTPException(404)

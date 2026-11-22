@@ -259,12 +259,20 @@ async def test_do_webhook_ao_pr_passando_pelos_dois_portoes_com_um_trace(amb: Am
     assert "codigo/x.py@dddddddddddd" in spec and "f-inventada" not in spec
     plano = amb.github.arquivo(BRANCH, f".forja/{ID}/plan.md")
     assert "src/auth.py" in plano
-    assert f"Intent-Id: {ID}" in amb.github.commits[0]["message"]
+    mensagem = amb.github.commits[0]["message"]
+    assert (
+        mensagem.splitlines()[0] == "forja(plan): intent.md"
+    )  # assunto numa linha, trailers em linhas próprias
+    assert f"\nIntent-Id: {ID}\n" in mensagem and "\nRun-Id: " in mensagem
+    assert mensagem.rstrip().endswith("Co-Authored-By: Forja <forja@users.noreply.github.com>")
     papeis = amb.sdk.papeis()
     assert papeis.count("pesquisador") == 3 and papeis[-2:] == ["spec", "planner"]
     # Nenhum agente do SDLC tem ferramenta, configuração de repositório nem MCP.
     for _, o in amb.sdk.chamadas:
         assert o.tools == [] and o.setting_sources == [] and o.mcp_servers == {}
+
+    def trace(span: Any) -> Any:
+        return getattr(span.context, "trace_id", None)
 
     spans = amb.spans.get_finished_spans()
     inicio = next(s for s in spans if "StartWorkflow" in s.name)
@@ -273,9 +281,12 @@ async def test_do_webhook_ao_pr_passando_pelos_dois_portoes_com_um_trace(amb: Am
         or s.name.startswith("RunWorkflow")
     ]  # fmt: skip
     assert len(da_entrega) > 8
-
-    def trace(span: Any) -> Any:
-        return getattr(span.context, "trace_id", None)
+    primeiro_webhook = next(
+        s
+        for s in spans
+        if s.name == "gateway.webhook" and (s.attributes or {}).get("forja.resultado") == "iniciada"
+    )
+    assert trace(primeiro_webhook) == trace(inicio)
 
     assert {trace(s) for s in da_entrega} == {trace(inicio)} and trace(inicio) is not None
     assert "forja_entregas_iniciadas_total 1.0" in amb.metricas.exportar().decode()
@@ -364,3 +375,48 @@ async def test_quem_nao_tem_escrita_nao_aciona_nada(amb: Ambiente):
     amb.github.permissao = "read"
     assert await amb.rotular("sem-1") == {"status": "ignorada"}
     assert amb.sdk.chamadas == [] and amb.github.comentarios == []
+
+
+async def test_confirmacao_antes_do_resumo_e_de_quem_nao_pediu_nao_valem(amb: Ambiente):
+    amb.sdk.atraso = 0.8  # o Intérprete demora: o resumo ainda não existe
+    amb.sdk.pontos = []
+    await amb.rotular("conf-1")
+    await esperar(lambda: len(amb.sdk.chamadas) == 1)
+    await amb.comentar("/forja confirm", "conf-2")  # antes do resumo: descartada
+    await esperar(lambda: any("/forja confirm" in c for c in amb.comentarios()))
+    amb.sdk.atraso = 0
+    assert await amb.comentar("/forja confirm", "conf-3", autor="outra-pessoa") == {
+        "status": "sinalizada"
+    }
+    await asyncio.sleep(0.5)
+    assert amb.sdk.papeis() == ["interprete"] and amb.github.prs == []  # nada passou do portão
+    await amb.comentar("/forja confirm", "conf-4")  # maria-dev pediu
+    await esperar(lambda: len(amb.github.prs) == 1)
+
+
+async def test_o_intent_editado_na_branch_e_o_que_o_design_le(amb: Ambiente):
+    import base64
+
+    amb.sdk.pontos = []
+    await amb.rotular("ed-1")
+    await esperar(lambda: any("/forja confirm" in c for c in amb.comentarios()))
+    caminho = (BRANCH, f".forja/{ID}/intent.md")
+    novo = "# intent\n\nVersão corrigida por uma pessoa\n"
+    amb.github.arquivos[caminho]["content"] = base64.b64encode(novo.encode()).decode()
+    await amb.comentar("/forja confirm", "ed-2")
+    await esperar(lambda: "pesquisador" in amb.sdk.papeis())
+    assert "Versão corrigida por uma pessoa" in amb.sdk.ultimo_prompt
+
+
+async def test_erro_ao_ler_a_edicao_humana_derruba_a_entrega_em_vez_de_usar_a_do_modelo(
+    amb: Ambiente,
+):
+    amb.sdk.pontos = ["decida"]
+    await amb.rotular("ler-1")
+    await esperar(lambda: any("/forja confirm" in c for c in amb.comentarios()))
+    await amb.comentar("/forja confirm", "ler-2")
+    await esperar(lambda: any("ponto(s) em aberto" in c for c in amb.comentarios()))
+    amb.github.falhar_leitura = True
+    await amb.comentar("/forja approve", "ler-3")
+    await esperar(lambda: "forja_entregas_erro_total 1.0" in amb.metricas.exportar().decode())
+    assert amb.github.prs == [] and "planner" not in amb.sdk.papeis()

@@ -103,6 +103,7 @@ class TemporalEntregaGateway:
             titulo=comando.titulo[:300],
             slug=slugificar(comando.titulo),
             url=comando.origem.url,
+            solicitantes=[a.lower() for a in (comando.autor, comando.autor_da_issue) if a],
             corpo=comando.corpo[:LIMITE_CORPO],
         )
         _, novo = await iniciar_ou_sinalizar(self._client, entrada, self._fila)

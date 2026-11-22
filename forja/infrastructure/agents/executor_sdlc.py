@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from forja.application.portas.agente import UsoModelo
 from forja.application.portas.sdlc import Especificador, Interprete, Pedido, Planejador
 from forja.infrastructure.temporal.activities import EtapaEntrada, EtapaSaida
+
+
+def _saida(etapa: str, resumo: str, texto: str, uso: UsoModelo, pontos: int = 0) -> EtapaSaida:
+    return EtapaSaida(
+        etapa, resumo, texto, pontos, uso.tokens_entrada, uso.tokens_saida, uso.custo_usd
+    )
 
 
 class ExecutorSdlc:
@@ -26,24 +33,22 @@ class ExecutorSdlc:
                     entrada.corpo,
                     entrada.url or None,
                 )
-                intent = (await self._interprete.interpretar(pedido)).valor
-                return EtapaSaida("plan", "intent", intent.renderizar())
+                r = await self._interprete.interpretar(pedido)
+                return _saida("plan", "intent", r.valor.renderizar(), r.uso)
             case "design":
-                spec = (
-                    await self._especificador.especificar(
-                        entrada.repositorio, self._exigir(entrada, "intent.md")
-                    )
-                ).valor
-                return EtapaSaida("design", "spec", spec.renderizar(), len(spec.pontos_em_aberto))
+                r = await self._especificador.especificar(
+                    entrada.repositorio, self._exigir(entrada, "intent.md")
+                )
+                return _saida(
+                    "design", "spec", r.valor.renderizar(), r.uso, len(r.valor.pontos_em_aberto)
+                )
             case "build":
-                plano = (
-                    await self._planejador.planejar(
-                        entrada.repositorio,
-                        self._exigir(entrada, "intent.md"),
-                        self._exigir(entrada, "spec.md"),
-                    )
-                ).valor
-                return EtapaSaida("build", "plano", plano.renderizar())
+                r = await self._planejador.planejar(
+                    entrada.repositorio,
+                    self._exigir(entrada, "intent.md"),
+                    self._exigir(entrada, "spec.md"),
+                )
+                return _saida("build", "plano", r.valor.renderizar(), r.uso)
             case _:
                 raise ValueError(f"etapa sem executor: {entrada.etapa[:40]}")
 

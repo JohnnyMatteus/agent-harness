@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import httpx
 
-from forja.domain.artefatos import caminho_relativo_seguro
+from forja.domain.artefatos import TETO_DE_ARTEFATO, ArtefatoInvalido, caminho_relativo_seguro
 from forja.infrastructure.github.erros import BranchProtegida, GitHubApiError
 
 PREFIXO_BRANCH = "forja/"
@@ -117,7 +117,14 @@ class GitHubCliente:
             if erro.status == 404:
                 return None
             raise
+        if (
+            int(dados.get("size", 0)) > TETO_DE_ARTEFATO
+            or len(str(dados["content"])) > TETO_DE_ARTEFATO * 2
+        ):
+            raise ArtefatoInvalido("arquivo acima do teto de tamanho de artefato")
         texto = base64.b64decode(dados["content"]).decode(errors="replace")
+        if len(texto) > TETO_DE_ARTEFATO:
+            raise ArtefatoInvalido("arquivo acima do teto de tamanho de artefato")
         return texto, str(dados["sha"])
 
     async def tem_escrita(self, repositorio: str, usuario: str) -> bool:
