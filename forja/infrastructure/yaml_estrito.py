@@ -3,9 +3,9 @@ do operador.
 
 O arquivo pode vir do repositório-alvo (policy.yaml: conteúdo não confiável). Aceita só:
 mapeamentos e listas em blocos (indentação de espaços), listas de escalares em linha
-(`[a, "b"]`) e escalares (texto, aspas, número, true/false/null). Recusa âncoras, tags, documentos múltiplos, blocos `|`/`>`,
-tabulação e aninhamento acima de 8 níveis. Não há dependência YAML no projeto: quando houver
-(PyYAML com `safe_load`), este módulo sai. Decisão registrada no ADR 0042.
+(`[a, "b"]`) e escalares (texto, aspas, número, true/false/null). Recusa âncoras, tags, documentos múltiplos, blocos
+`|`/`>`, tabulação e aninhamento acima de 8 níveis. Não há dependência YAML no projeto:
+quando houver (PyYAML com `safe_load`), este módulo sai. Decisão registrada no ADR 0042.
 """
 
 from __future__ import annotations
