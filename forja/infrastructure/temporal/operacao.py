@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 
 from temporalio import activity, workflow
@@ -56,6 +56,8 @@ class MonitorEntrada:
     repositorio: str
     intervalo_s: float = 300.0
     iteracoes_por_execucao: int = 288  # 1 dia a cada 5 min; depois continue_as_new
+    # Banda -> instante do último incidente iniciado; atravessa o continue_as_new.
+    ultimo_incidente: dict[str, float] = field(default_factory=dict[str, float])
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ class MonitorDeBandas:
         registra `sem_dados`, espera e segue. Só para com o sinal ou se o repositório saiu da
         lista do operador."""
         saida = MonitorSaida()
+        ultimo = dict(entrada.ultimo_incidente)
         for _ in range(entrada.iteracoes_por_execucao):
             if self._parar:
                 return saida
@@ -300,7 +303,13 @@ class MonitorDeBandas:
             for v in verificacoes:
                 if v.estado != EstadoDaBanda.VIOLADA:
                     continue  # dentro, ou sem dados (que não abre incidente, só é dito)
-                wid = id_do_incidente(entrada.repositorio, v.banda_id, workflow.now().timestamp())
+                agora = workflow.now().timestamp()
+                anterior = ultimo.get(v.banda_id)
+                # O id por hora cheia sozinho deixaria pagar às 20:59 e de novo às 21:04.
+                if anterior is not None and agora - anterior < JANELA_DO_INCIDENTE_S:
+                    continue
+                ultimo[v.banda_id] = agora
+                wid = id_do_incidente(entrada.repositorio, v.banda_id, agora)
                 try:
                     await workflow.start_child_workflow(
                         IncidentWorkflow.run,
@@ -319,4 +328,4 @@ class MonitorDeBandas:
                     lambda: self._parar,
                     timeout=timedelta(seconds=intervalo_valido(entrada.intervalo_s)),
                 )
-        workflow.continue_as_new(entrada)
+        workflow.continue_as_new(replace(entrada, ultimo_incidente=ultimo))
