@@ -12,7 +12,7 @@ Activities do Temporal são retentadas; uma escrita no GitHub repetida vira come
 
 - Toda escrita externa passa pela porta `Publicador`. A implementação `PublicadorGitHub` é dry-run a menos que `FORJA_PUBLICAR=true`; em dry-run só registra em log.
 - Idempotência por chave determinística (`<intent-id>:<ponto>`): `SET NX` no Redis com lease de 10 min reivindica a chave de forma atômica; sucesso grava `concluida` por 30 dias; falha libera a chave; outra tentativa em curso levanta `PublicacaoEmAndamento` (o Temporal retenta).
-- Todo corpo é neutralizado na saída (menções `@` quebradas, `<` escapado para impedir marcadores forjados, tamanho limitado) e o destino é validado.
+- Todo corpo é neutralizado na saída (menções `@` quebradas; `<` escapado; imagens, links e definições markdown removidos e `://` e `www.` defangados, porque o GitHub busca imagens sozinho e `![](https://x/?dados)` vazaria dados; segredos redigidos; tamanho limitado) e o destino é validado.
 
 ## Alternativas consideradas
 

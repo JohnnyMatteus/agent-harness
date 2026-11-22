@@ -1,4 +1,7 @@
-"""Agente eco: roda dentro do sandbox e devolve o texto do Intent, sem lógica de negócio."""
+"""Agente eco: devolve o texto do Intent, sem ferramenta e sem lógica de negócio.
+
+Não precisa de sandbox: não tem ferramenta, não lê arquivo e não vê o repositório.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +13,6 @@ from forja.application.portas.agente import (
     PedidoAgente,
     RespostaDoAgente,
 )
-from forja.application.portas.sandbox import SandboxAtivo
 from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
 
 
@@ -36,6 +38,6 @@ class AgenteEco:
         )
         return cls(runner, limites)
 
-    async def executar(self, sandbox: SandboxAtivo, texto_do_intent: str) -> RespostaDoAgente:
-        pedido = PedidoAgente(texto_do_intent, sandbox.worktree, self._limites)
+    async def executar(self, texto_do_intent: str) -> RespostaDoAgente:
+        pedido = PedidoAgente(texto_do_intent, limites=self._limites)
         return await self._runner.executar(pedido)

@@ -1,8 +1,7 @@
 """M1 ponta a ponta: webhook assinado -> gateway -> Temporal -> sandbox -> eco -> comentário.
 
-Roda com sandbox em memória em todo `pytest`; a variante `docker` usa o `DockerSandbox` real e
-só roda no CI (`pytest -m integration`, depois de `infra/sandbox/preparar.sh`).
-O GitHub é falso e local; o SDK do agente é falso.
+O eco não tem ferramenta nem sandbox; o isolamento do SDK é testado em
+`tests/infrastructure/agents/test_isolamento.py`. O GitHub é falso e local; o SDK é falso.
 """
 
 # pyright: basic
@@ -11,12 +10,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import shutil
-import subprocess
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import fakeredis
 import httpx
@@ -30,7 +26,6 @@ from temporalio.testing import WorkflowEnvironment
 
 from forja.application.casos_de_uso.acionar_panico import AcionarPanico
 from forja.application.casos_de_uso.ativar_entrega import AtivarEntrega
-from forja.application.portas.sandbox import EspecSandbox, ResultadoComando
 from forja.domain.intent import Origem, TipoDeOrigem, intent_id_de
 from forja.infrastructure.agents.eco import AgenteEco
 from forja.infrastructure.agents.executor_eco import ExecutorEco
@@ -40,9 +35,6 @@ from forja.infrastructure.github.cliente import GitHubCliente
 from forja.infrastructure.github.entregas_vistas import RegistroEntregasRedis
 from forja.infrastructure.github.publicador import PublicadorGitHub
 from forja.infrastructure.persistencia.idempotencia_redis import IdempotenciaRedis
-from forja.infrastructure.sandbox.docker import DockerSandbox
-from forja.infrastructure.sandbox.repositorios import RepositoriosLocais
-from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
 from forja.infrastructure.telemetry.metricas import MetricasForja
 from forja.infrastructure.temporal.activities import DeliveryActivities
 from forja.infrastructure.temporal.worker import TemporalEntregaGateway, criar_worker
@@ -59,39 +51,19 @@ REPO = "acme-demo/loja-exemplo"
 ID_ISSUE_42 = intent_id_de(Origem(TipoDeOrigem.ISSUE_GITHUB, REPO, "42", "t"))
 
 
-class SandboxEmMemoria:
-    def __init__(self, raiz: Path) -> None:
-        self.raiz = raiz
-        self.criados: list[str] = []
-        self.destruidos: list[str] = []
-
-    async def criar(self, spec: EspecSandbox) -> Any:
-        self.criados.append(spec.sessao_id)
-        wt = self.raiz / spec.sessao_id
-        wt.mkdir(parents=True, exist_ok=True)
-        sessao = spec.sessao_id
-
-        class Ativo:
-            sessao_id = sessao
-            worktree = wt
-
-            async def executar(self, comando: list[str], timeout_s: float = 60.0):
-                return ResultadoComando(0, "", "")
-
-        return Ativo()
-
-    async def destruir(self, sessao_id: str) -> None:
-        self.destruidos.append(sessao_id)
-
-
 class SdkFalso:
     def __init__(self) -> None:
         self.atraso = 0.0
         self.chamadas: list[tuple[str, ClaudeAgentOptions]] = []
+        self.canceladas = 0
 
     async def __call__(self, *, prompt: str, options: ClaudeAgentOptions):
         self.chamadas.append((prompt, options))
-        await asyncio.sleep(self.atraso)
+        try:
+            await asyncio.sleep(self.atraso)
+        except asyncio.CancelledError:
+            self.canceladas += 1
+            raise
         yield AssistantMessage(content=[TextBlock(text="x")], model="m")
         yield ResultMessage(
             subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
@@ -105,7 +77,6 @@ class Ambiente:
     http: httpx.AsyncClient
     github: GitHubFalso
     sdk: SdkFalso
-    sandbox: Any
     spans: InMemorySpanExporter
     metricas: MetricasForja
     entregas: dict[str, int] = field(default_factory=dict)
@@ -133,39 +104,16 @@ async def esperar(condicao: Callable[[], bool], segundos: float = 30) -> None:
             await asyncio.sleep(0.05)
 
 
-GIT_IDENTIDADE = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
-
-
-def _repo_git(raiz: Path) -> None:
-    destino = raiz / REPO
-    destino.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q"], cwd=destino, check=True)
-    subprocess.run(
-        [*GIT_IDENTIDADE, "commit", "-q", "--allow-empty", "-m", "i"],
-        cwd=destino,
-        check=True,
-    )
-
-
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def temporal():
     async with await WorkflowEnvironment.start_time_skipping() as e:
         yield e
 
 
-@pytest.fixture(
-    params=["memoria", pytest.param("docker", marks=pytest.mark.integration)], scope="module"
-)
-def variante(request: pytest.FixtureRequest) -> str:
-    return request.param
-
-
 @pytest_asyncio.fixture(loop_scope="module")
 async def amb(
-    temporal: WorkflowEnvironment, variante: str, tmp_path: Path, chave_pem: str, monkeypatch
+    temporal: WorkflowEnvironment, chave_pem: str, monkeypatch
 ) -> AsyncIterator[Ambiente]:
-    if variante == "docker" and shutil.which("docker") is None:
-        pytest.skip("sem Docker")
     exp = InMemorySpanExporter()
     prov = TracerProvider()
     prov.add_span_processor(SimpleSpanProcessor(exp))
@@ -180,11 +128,6 @@ async def amb(
         namespace=temporal.client.namespace,
         interceptors=[TracingInterceptor(prov.get_tracer("forja"))],
     )
-    _repo_git(tmp_path / "repos")
-    if variante == "docker":
-        sandbox: Any = DockerSandbox(GerenciadorWorktree(tmp_path / "wt"))
-    else:
-        sandbox = SandboxEmMemoria(tmp_path / "wt")
     github = GitHubFalso()
     http_gh = github.cliente_http()
     cliente_gh = GitHubCliente(GitHubAppAuth("1", chave_pem, http_gh), http_gh)
@@ -192,9 +135,7 @@ async def amb(
     metricas = MetricasForja()
     sdk = SdkFalso()
     atividades = DeliveryActivities(
-        ExecutorEco(
-            sandbox, AgenteEco.com_sdk(sdk), RepositoriosLocais(tmp_path / "repos").caminho
-        ),
+        ExecutorEco(AgenteEco.com_sdk(sdk)),
         intervalo_heartbeat_s=0.2,
         publicador=PublicadorGitHub(cliente_gh, IdempotenciaRedis(redis), dry_run=False),
         metricas=metricas,
@@ -213,14 +154,14 @@ async def amb(
         criar_worker(client, atividades),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://forja") as http,
     ):
-        yield Ambiente(http, github, sdk, sandbox, exp, metricas)
+        yield Ambiente(http, github, sdk, exp, metricas)
         # Entregas vizinhas usam a mesma issue (mesmo id): encerra o que ficou esperando.
         with contextlib.suppress(Exception):
             await client.get_workflow_handle(ID_ISSUE_42).terminate("fim do teste")
     await http_gh.aclose()
 
 
-async def test_caminho_feliz_comenta_pelo_workflow_com_um_trace(amb: Ambiente, variante: str):
+async def test_caminho_feliz_comenta_pelo_workflow_com_um_trace(amb: Ambiente):
     resposta = await amb.webhook("issues_labeled_forja_intent", "e2e-feliz")
     assert resposta == {"status": "iniciada"}
     await esperar(lambda: len(amb.github.comentarios) == 1)
@@ -231,8 +172,6 @@ async def test_caminho_feliz_comenta_pelo_workflow_com_um_trace(amb: Ambiente, v
     prompt, opts = amb.sdk.chamadas[0]
     assert "Corrigir login" in prompt and opts.allowed_tools == []
     assert "Bash" in opts.disallowed_tools
-    if variante == "memoria":
-        await esperar(lambda: bool(amb.sandbox.destruidos))
     spans = amb.spans.get_finished_spans()
     nomes = {s.name for s in spans}
     assert {"gateway.webhook", "agente.sessao"} <= nomes
@@ -257,21 +196,12 @@ async def test_entrega_repetida_nao_duplica_comentario_nem_execucao(amb: Ambient
     assert len(amb.github.comentarios) == 1 and len(amb.sdk.chamadas) == 1
 
 
-async def test_parar_cancela_o_workflow_e_destroi_o_sandbox(amb: Ambiente, variante: str):
+async def test_parar_cancela_o_workflow_e_a_sessao_do_agente(amb: Ambiente):
     amb.sdk.atraso = 3600
     await amb.webhook("issues_labeled_forja_intent", "stop-1")
     await esperar(lambda: len(amb.sdk.chamadas) == 1)
     assert await amb.webhook("issue_comment_stop", "stop-2") == {"status": "sinalizada"}
-    if variante == "memoria":
-        await esperar(lambda: bool(amb.sandbox.destruidos))
-        assert amb.sandbox.destruidos[-1] == amb.sandbox.criados[-1]
-    else:
-        await esperar(
-            lambda: not subprocess.run(
-                ["docker", "ps", "-aq", "--filter", "label=forja.sessao"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-        )  # fmt: skip
+    await esperar(lambda: amb.sdk.canceladas == 1)
     assert amb.github.comentarios == []
 
 

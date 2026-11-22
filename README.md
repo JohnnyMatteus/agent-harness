@@ -19,8 +19,8 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | Ambiente local: Postgres+pgvector, Redis, Temporal dev server, Phoenix | |
 | `DeliveryWorkflow` no Temporal (teste com test server), agente eco e telemetria | |
 | Sandbox Docker efêmero (sem root, `--read-only`, rede interna, proxy Squid em allowlist), ADR 0032 | |
-| Binário `forja serve` e `forja worker` (ADR 0033): webhook verificado, `DeliveryWorkflow`, sandbox, agente eco, comentário publicado só pelo workflow (dry-run por padrão, ADR 0034), trace único e `/metrics` | |
-| Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); a variante com Docker real roda no CI | |
+| Binário `forja serve` e `forja worker` (ADR 0033): webhook verificado, `DeliveryWorkflow`, agente eco sem ferramenta e com ambiente isolado (ADR 0036), comentário publicado só pelo workflow (dry-run por padrão, ADR 0034), trace único e `/metrics` | |
+| Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); o isolamento do SDK tem teste do comando e do ambiente efetivos | |
 
 RAG, política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 
@@ -124,6 +124,7 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 
 ## Próximos passos
 
+- Agentes com ferramenta (M3/M4) rodam o CLI dentro do sandbox (modo `docker` do lançador, ADR 0036): a imagem com o CLI e o modo ainda não foram exercitados contra Docker real.
 - Aprovação humana com rejeição (hoje não há aresta no diagrama).
 - Política de risco e hooks (M5), recuperação híbrida com pgvector e BM25 (M2), evals contínuos (M8).
 - Helm e implantação em cluster.

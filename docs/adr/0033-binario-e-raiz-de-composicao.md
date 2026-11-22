@@ -13,8 +13,8 @@ Até aqui as peças do M1 (gateway, Temporal, sandbox, agente eco, GitHub) exist
 - `forja serve` sobe o gateway FastAPI (webhooks, `/panico`, `/metrics`); `forja worker` sobe o worker do Temporal com as activities. Os dois processos compartilham só Temporal e Redis.
 - A única raiz de composição é `forja/interfaces/cli/composicao.py`; nenhum outro módulo instancia adaptadores. A configuração vem do ambiente (`Ajustes`, `GitHubConfig`) e é documentada em `.env.example`.
 - O worker roda no host (ou onde houver acesso ao Docker), não em container do compose: ele cria containers irmãos e dar o socket do Docker a um container equivale a root no host.
-- No M1 a etapa Plan é o agente eco: a activity cria o sandbox, roda o agente, destrói o sandbox (também se cancelada) e devolve o texto; quem publica é o workflow, em outra activity (ADR 0007). O Intérprete do M3 ocupa o mesmo lugar.
-- O repositório-alvo é um clone local em `FORJA_REPOS_DIR/<dono>/<nome>`, preparado pelo operador; o nome vem do webhook e é validado antes de virar caminho.
+- No M1 a etapa Plan é o agente eco: uma activity chama o agente (sem ferramenta, sem sandbox: ver ADR 0036) e devolve o texto; quem publica é o workflow, em outra activity (ADR 0007). O Intérprete do M3 ocupa o mesmo lugar. O sandbox só entra para agentes com ferramenta.
+- O repositório-alvo (usado a partir do M3) é um clone local em `FORJA_REPOS_DIR/<dono>/<nome>`, preparado pelo operador; o nome vem do webhook e é validado antes de virar caminho.
 
 ## Alternativas consideradas
 

