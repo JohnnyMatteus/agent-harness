@@ -52,3 +52,39 @@ def test_payload_sem_o_essencial_nao_lanca(fixture_json: Callable[[str], Any]) -
 def test_eventos_sem_suporte_e_ping(fixture_json: Callable[[str], Any]) -> None:
     assert traduzir("ping", fixture_json("ping")) == Ignorado("ping")
     assert isinstance(traduzir("pull_request", {}), Ignorado)
+
+
+def _comentario(
+    fixture_json: Callable[[str], Any], texto: str, tipo: str = "User"
+) -> dict[str, Any]:
+    dados = fixture_json("issue_comment_stop")
+    dados["comment"]["body"] = texto
+    dados["comment"]["user"]["type"] = tipo
+    return dados
+
+
+def test_comandos_de_confirmacao_aprovacao_e_rejeicao(fixture_json: Callable[[str], Any]) -> None:
+    from forja.application.comandos import Aprovar, Confirmar, Rejeitar
+
+    assert isinstance(
+        traduzir("issue_comment", _comentario(fixture_json, "/forja confirm")), Confirmar
+    )
+    assert isinstance(
+        traduzir("issue_comment", _comentario(fixture_json, "ok\n/forja APPROVE")), Aprovar
+    )
+    rejeicao = traduzir("issue_comment", _comentario(fixture_json, "/forja reject fora do escopo"))
+    assert isinstance(rejeicao, Rejeitar) and rejeicao.motivo == "fora do escopo"
+    longa = traduzir("issue_comment", _comentario(fixture_json, "/forja reject " + "x" * 900))
+    assert isinstance(longa, Ignorado) or len(longa.motivo) <= 500  # type: ignore[union-attr]
+
+
+def test_comando_citado_ou_de_bot_nao_conta(fixture_json: Callable[[str], Any]) -> None:
+    assert isinstance(
+        traduzir("issue_comment", _comentario(fixture_json, "> /forja approve")), Ignorado
+    )
+    assert isinstance(
+        traduzir("issue_comment", _comentario(fixture_json, "/forja approve", "Bot")), Ignorado
+    )
+    assert isinstance(
+        traduzir("issue_comment", _comentario(fixture_json, "vou /forja approve depois")), Ignorado
+    )

@@ -1,35 +1,51 @@
-"""DeliveryWorkflow: um workflow por intenção, com sinais de confirmação e parada.
+"""DeliveryWorkflow: um workflow por intenção, com portões humanos por sinal.
 
 Código de workflow precisa ser determinístico; todo efeito externo fica em activities.
 As transições vêm do agregado `Entrega` do domínio; o workflow só as dispara.
+
+M3 (até o PR): Plan (Intérprete) -> confirmação -> Design (Spec) -> portão de spec, se houver
+pontos em aberto -> Build (Planner) -> PR de artefatos em rascunho. Verificação, Executor e
+Avaliador são o M4; a rejeição termina o workflow sem aresta nova na máquina de estados.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from forja.domain.entrega import Entrega
-    from forja.domain.estados import Estado, RaioDeImpacto
-    from forja.infrastructure.temporal.activities import EtapaEntrada, EtapaSaida, PublicarEntrada
+    from forja.domain.estados import Estado
+    from forja.infrastructure.temporal.activities import (
+        ArtefatoEntrada,
+        EtapaEntrada,
+        EtapaSaida,
+        PrEntrada,
+        PublicarEntrada,
+    )
+
+# Erros que repetir não resolve: saída de modelo fora do schema, dado inválido, branch recusada.
+NAO_REPETIR = ["SaidaInvalida", "ArtefatoInvalido", "ValueError", "BranchProtegida", "SandboxError"]
+LIMITE_MOTIVO = 500
 
 
 class Desfecho(StrEnum):
     CONCLUIDA = "concluida"
     CANCELADA = "cancelada"
+    REJEITADA = "rejeitada"
+    ARTEFATOS_PUBLICADOS = "artefatos_publicados"
 
 
 @dataclass(frozen=True)
 class DeliveryEntrada:
     intent_id: str
-    # Prazo do lembrete de aprovação (configuração; o design doc cita 48 h como exemplo).
+    # Prazo do lembrete de decisão (configuração; o design doc cita 48 h como exemplo).
     prazo_lembrete_s: float = 48 * 3600
     timeout_etapa_s: float = 3600
     heartbeat_s: float = 30
@@ -38,6 +54,8 @@ class DeliveryEntrada:
     numero: int = 0
     titulo: str = ""
     corpo: str = ""
+    url: str = ""
+    slug: str = "intent"
 
 
 @dataclass
@@ -48,6 +66,8 @@ class DeliverySaida:
     etapas_executadas: list[str] = field(default_factory=list[str])
     lembretes: int = 0
     sinais_repetidos: int = 0
+    pr_url: str = ""
+    motivo_da_rejeicao: str = ""
 
 
 def workflow_id(intent_id: str) -> str:
@@ -64,10 +84,26 @@ class DeliveryWorkflow:
         self._lembretes = 0
         self._repetidos = 0
         self._executadas: list[str] = []
+        self._artefatos: dict[str, str] = {}
+        self._portao: str | None = None
+        self._decisao: tuple[str, str, str] | None = None
+        self._pr_url = ""
+        self._motivo = ""
 
     @workflow.signal
-    def confirmar(self) -> None:
+    def confirmar(self, quem: str = "") -> None:
         self._confirmado = True
+
+    @workflow.signal
+    def aprovar(self, quem: str = "") -> None:
+        """Só vale com um portão aberto: aprovação antecipada é descartada, não guardada."""
+        if self._portao is not None and self._decisao is None:
+            self._decisao = ("aprovada", quem, "")
+
+    @workflow.signal
+    def rejeitar(self, quem: str = "", motivo: str = "") -> None:
+        if self._portao is not None and self._decisao is None:
+            self._decisao = ("rejeitada", quem, motivo[:LIMITE_MOTIVO])
 
     @workflow.signal
     def parar(self) -> None:
@@ -83,6 +119,10 @@ class DeliveryWorkflow:
         return self._entrega.estado.value if self._entrega else Estado.PLAN.value
 
     @workflow.query
+    def portao_aberto(self) -> str:
+        return self._portao or ""
+
+    @workflow.query
     def lembretes_registrados(self) -> int:
         return self._lembretes
 
@@ -94,12 +134,11 @@ class DeliveryWorkflow:
             await workflow.wait([corpo, parada], return_when=asyncio.FIRST_COMPLETED)
             if corpo.done() and not self._parar:
                 try:
-                    corpo.result()
+                    desfecho = corpo.result()
                 except BaseException:
-                    await self._desfecho("erro")
+                    await self._registrar_desfecho("erro")
                     raise
-                desfecho = Desfecho.CONCLUIDA
-                await self._desfecho("concluida")
+                await self._registrar_desfecho(desfecho.value)
             else:
                 corpo.cancel()
                 await asyncio.gather(corpo, return_exceptions=True)
@@ -118,16 +157,82 @@ class DeliveryWorkflow:
             etapas_executadas=list(self._executadas),
             lembretes=self._lembretes,
             sinais_repetidos=self._repetidos,
+            pr_url=self._pr_url,
+            motivo_da_rejeicao=self._motivo,
         )
 
-    async def _percorrer(self, entrada: DeliveryEntrada) -> None:
+    async def _percorrer(self, entrada: DeliveryEntrada) -> Desfecho:
         entrega = self._entrega = Entrega(intent_id=entrada.intent_id)
-        await self._etapa_plan(entrada)
-        await self._aguardar_confirmacao(entrada)
+
+        plan = await self._executar(entrada, "plan")  # Intérprete
+        self._artefatos["intent.md"] = plan.texto
+        await self._commitar(entrada, "intent.md", "plan")
+        await self._comentar(
+            entrada,
+            "intent",
+            f"Resumo da intenção. Responda `/forja confirm` para seguir.\n\n{plan.texto}",
+        )
+        await self._aguardar(lambda: self._confirmado, entrada, "confirmação do intent")
         entrega.confirmar_intent()
-        while entrega.estado is not Estado.MAINTAIN:
-            await self._executar(entrada, entrega.estado.value)
-            self._avancar(entrega)
+
+        design = await self._executar(entrada, "design")  # Spec
+        self._artefatos["spec.md"] = design.texto
+        await self._commitar(entrada, "spec.md", "design")
+        entrega.concluir_spec(design.pontos_em_aberto)
+        if entrega.estado is Estado.AGUARDANDO_SPEC:
+            await self._comentar(
+                entrada,
+                "spec",
+                f"A spec tem {design.pontos_em_aberto} ponto(s) em aberto. Edite `spec.md` na "
+                "branch se precisar e responda `/forja approve` ou `/forja reject <motivo>`."
+                f"\n\n{design.texto}",
+            )
+            decisao, quem, motivo = await self._portao_humano(entrada, "spec")
+            if decisao == "rejeitada":
+                self._motivo = motivo
+                await self._comentar(
+                    entrada, "spec-rejeitada", f"Entrega encerrada: spec rejeitada por {quem}."
+                )
+                return Desfecho.REJEITADA
+            editada = await self._ler(entrada, "spec.md")
+            if editada:
+                self._artefatos["spec.md"] = editada
+            entrega.resolver_pontos_em_aberto()
+
+        build = await self._executar(entrada, "build")  # Planner
+        self._artefatos["plan.md"] = build.texto
+        await self._commitar(entrada, "plan.md", "build")
+        self._pr_url = await self._abrir_pr(entrada)
+        await self._comentar(entrada, "pr", f"PR de artefatos aberto em rascunho: {self._pr_url}")
+        return Desfecho.ARTEFATOS_PUBLICADOS
+
+    # --- portões -----------------------------------------------------------------------
+
+    async def _portao_humano(self, entrada: DeliveryEntrada, nome: str) -> tuple[str, str, str]:
+        self._portao, self._decisao = nome, None
+        await self._aguardar(
+            lambda: self._decisao is not None, entrada, f"decisão do portão {nome}"
+        )
+        decisao = self._decisao or ("rejeitada", "", "")
+        self._portao = None
+        return decisao
+
+    async def _aguardar(
+        self, condicao: Callable[[], bool], entrada: DeliveryEntrada, o_que: str
+    ) -> None:
+        while not condicao():
+            try:
+                await workflow.wait_condition(
+                    condicao, timeout=timedelta(seconds=entrada.prazo_lembrete_s)
+                )
+            except TimeoutError:
+                self._lembretes += 1
+                workflow.logger.info("lembrete pendente: intent=%s %s", entrada.intent_id, o_que)
+                await self._comentar(
+                    entrada, f"lembrete-{self._lembretes}", f"Lembrete: aguardando {o_que}."
+                )
+
+    # --- activities --------------------------------------------------------------------
 
     async def _executar(self, entrada: DeliveryEntrada, etapa: str) -> EtapaSaida:
         saida: EtapaSaida = await workflow.execute_activity(
@@ -139,18 +244,72 @@ class DeliveryWorkflow:
                 numero=entrada.numero,
                 titulo=entrada.titulo,
                 corpo=entrada.corpo,
+                url=entrada.url,
+                artefatos=dict(self._artefatos),
             ),
             result_type=EtapaSaida,
             start_to_close_timeout=timedelta(seconds=entrada.timeout_etapa_s),
             heartbeat_timeout=timedelta(seconds=entrada.heartbeat_s),
             cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=NAO_REPETIR),
         )
         self._executadas.append(saida.etapa)
         return saida
 
-    async def _publicar(self, entrada: DeliveryEntrada, corpo: str, chave: str) -> None:
-        """Só o workflow escreve no GitHub (ADR 0007); a activity é idempotente pela chave."""
+    def _artefato(
+        self, e: DeliveryEntrada, nome: str, conteudo: str = "", etapa: str = ""
+    ) -> ArtefatoEntrada:
+        return ArtefatoEntrada(e.repositorio, e.intent_id, e.slug, nome, conteudo, etapa)
+
+    async def _commitar(self, entrada: DeliveryEntrada, nome: str, etapa: str) -> None:
+        """Só o workflow escreve no GitHub (ADR 0007); o commit é idempotente."""
+        if not entrada.repositorio:
+            return
+        await workflow.execute_activity(
+            "commitar_artefato",
+            self._artefato(entrada, nome, self._artefatos[nome], etapa),
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
+        )
+
+    async def _ler(self, entrada: DeliveryEntrada, nome: str) -> str:
+        if not entrada.repositorio:
+            return ""
+        return await workflow.execute_activity(
+            "ler_artefato",
+            self._artefato(entrada, nome),
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+    async def _abrir_pr(self, entrada: DeliveryEntrada) -> str:
+        if not entrada.repositorio:
+            return ""
+        corpo = (
+            f"Entrega da intent `{entrada.intent_id}` (issue #{entrada.numero}). "
+            f"Artefatos em `.forja/{entrada.intent_id}/`. Em rascunho: o código ainda não foi "
+            "implementado.\n\n"
+            + "\n\n".join(self._artefatos[n] for n in ("intent.md", "spec.md", "plan.md"))
+        )
+        return await workflow.execute_activity(
+            "abrir_pr",
+            PrEntrada(
+                entrada.repositorio,
+                entrada.intent_id,
+                entrada.slug,
+                f"forja: {entrada.titulo}",
+                corpo,
+            ),
+            result_type=str,
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
+        )
+
+    async def _comentar(self, entrada: DeliveryEntrada, chave: str, corpo: str) -> None:
+        if not entrada.repositorio:
+            return
         await workflow.execute_activity(
             "publicar_comentario",
             PublicarEntrada(
@@ -158,47 +317,13 @@ class DeliveryWorkflow:
             ),
             result_type=str,
             start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(maximum_attempts=5),
+            retry_policy=RetryPolicy(maximum_attempts=5, non_retryable_error_types=NAO_REPETIR),
         )
 
-    async def _desfecho(self, desfecho: str) -> None:
+    async def _registrar_desfecho(self, desfecho: str) -> None:
         await workflow.execute_activity(
             "registrar_desfecho",
             desfecho,
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
-
-    async def _etapa_plan(self, entrada: DeliveryEntrada) -> None:
-        """No M1 a etapa Plan é o agente eco: roda no sandbox e o workflow publica a resposta."""
-        saida = await self._executar(entrada, Estado.PLAN.value)
-        if saida.texto and entrada.repositorio:
-            await self._publicar(entrada, f"**Forja (eco)**\n\n{saida.texto}", "plan")
-
-    @staticmethod
-    def _avancar(entrega: Entrega) -> None:
-        """Caminho feliz do esqueleto do M1; verificação e review reais vêm depois."""
-        match entrega.estado:
-            case Estado.DESIGN:
-                entrega.concluir_spec(pontos_em_aberto=0)
-            case Estado.BUILD:
-                entrega.concluir_build()
-            case Estado.TEST:
-                entrega.registrar_verificacao(verde=True)
-            case Estado.REVIEW:
-                entrega.concluir_review(achados_bloqueantes=False, raio=RaioDeImpacto.BAIXO)
-            case Estado.DEPLOY:
-                entrega.concluir_deploy()
-            case _:
-                raise ApplicationError(f"estado sem avanço automático: {entrega.estado}")
-
-    async def _aguardar_confirmacao(self, entrada: DeliveryEntrada) -> None:
-        while not self._confirmado:
-            try:
-                await workflow.wait_condition(
-                    lambda: self._confirmado, timeout=timedelta(seconds=entrada.prazo_lembrete_s)
-                )
-            except TimeoutError:
-                # No M1 o lembrete só é registrado; nada externo é enviado.
-                self._lembretes += 1
-                workflow.logger.info("lembrete de aprovação pendente: intent=%s", entrada.intent_id)

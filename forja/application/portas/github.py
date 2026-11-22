@@ -11,3 +11,17 @@ class GitHubPort(Protocol):
     async def criar_branch(self, repositorio: str, intent_id: str, slug: str) -> str:
         """Cria `forja/<intent-id>-<slug>` a partir da branch padrão e devolve o nome."""
         ...
+
+    async def commitar_arquivo(
+        self, repositorio: str, branch: str, caminho: str, conteudo: str, mensagem: str
+    ) -> bool:
+        """Cria ou atualiza um arquivo na branch da entrega; False se já tinha o mesmo conteúdo."""
+        ...
+
+    async def ler_arquivo(self, repositorio: str, branch: str, caminho: str) -> str | None: ...
+
+    async def abrir_pr(
+        self, repositorio: str, branch: str, titulo: str, corpo: str, rascunho: bool
+    ) -> str:
+        """Abre o PR da branch ou devolve a URL do que já existe (idempotente)."""
+        ...

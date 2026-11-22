@@ -20,3 +20,17 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Test double determinístico | `EmbedderFalso` | Reprodutível e sem rede; declara no próprio resultado o que não prova |
 | Composition root fino | `interfaces/mcp/composicao.py`, `interfaces/cli/indexar.py` | A ligação com o ambiente fica na borda; configuração ruim falha, não improvisa |
 | Fail fast em configuração | `configuracao.py` | Embedder real inexistente não é simulado |
+
+## SDLC até o PR (M3)
+
+| Padrão ou princípio | Onde | Por quê |
+| --- | --- | --- |
+| Value Object validado | `domain/artefatos.py` (`IntentMd`, `Spec`, `Plano`, `caminho_relativo_seguro`) | Dado de modelo só vira artefato depois de passar nas invariantes do domínio |
+| Parse, don't validate (anti-corruption para saída de LLM) | `agents/esquemas.py`, `agents/estruturado.py` | O resto do sistema nunca vê texto livre de modelo |
+| Ports and Adapters | `portas/sdlc.py` (Interprete, Especificador, Planejador, PesquisaDeConhecimento, ListadorDeArquivos) | Trocar o SDK, o RAG ou a origem dos arquivos não toca o workflow |
+| Orquestrador-trabalhadores | `EspecificadorMultiagente` | Pesquisadores em paralelo por tipo de fonte, líder escreve a spec (ADR 0017) |
+| Strategy (despacho por etapa) | `ExecutorSdlc` | Cada etapa tem um agente; o workflow só conhece o nome da etapa |
+| Idempotência por chave e por conteúdo | `PublicadorGitHub` | Retentativa do Temporal não duplica commit, comentário nem PR |
+| Dry-run por padrão | `PublicadorGitHub` | Nada é escrito sem `FORJA_PUBLICAR=true` |
+| Máquina de portões por sinal | `DeliveryWorkflow` | Decisão humana durável; sinal fora do portão é descartado |
+| Defesa em profundidade na saída | `neutralizar_texto` no publicador | Mesmo que o modelo obedeça a injeção, o texto publicado não abre canal |

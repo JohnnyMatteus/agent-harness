@@ -31,6 +31,9 @@ class Ajustes(BaseSettings):
     api_host: str = Field("127.0.0.1", validation_alias="FORJA_API_HOST")
     api_porta: int = Field(8000, validation_alias="FORJA_API_PORTA")
     metricas_porta: int = Field(9102, validation_alias="FORJA_METRICAS_PORTA")
+    # RAG do M2: sem os dois, a spec sai sem fontes. O embedder real é decisão pendente do autor.
+    database_url: str | None = Field(None, validation_alias="DATABASE_URL")
+    embedder: str | None = Field(None, validation_alias="FORJA_EMBEDDER")
     modelo: str | None = Field(None, validation_alias="FORJA_MODELO")
 
     @field_validator("repos_habilitados", mode="before")

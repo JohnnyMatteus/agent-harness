@@ -17,6 +17,9 @@ class Entregas:
     async def iniciar(self, *_: Any, **__: Any) -> ResultadoInicio:
         return "iniciada"
 
+    async def sinalizar(self, *_: Any, **__: Any) -> bool:
+        return True
+
     async def parar(self, *_: Any, **__: Any) -> bool:
         return True
 

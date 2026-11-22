@@ -34,11 +34,37 @@ class Parar:
 
 
 @dataclass(frozen=True, slots=True)
+class Confirmar:
+    """`/forja confirm`: quem pediu confirma o resumo do intent.md."""
+
+    origem: OrigemExterna
+    autor: str
+
+
+@dataclass(frozen=True, slots=True)
+class Aprovar:
+    """`/forja approve`: decisão humana num portão (spec com pontos em aberto, PR de risco)."""
+
+    origem: OrigemExterna
+    autor: str
+
+
+@dataclass(frozen=True, slots=True)
+class Rejeitar:
+    """`/forja reject <motivo>`: o motivo é texto não confiável."""
+
+    origem: OrigemExterna
+    autor: str
+    motivo: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Ignorado:
     motivo: str
 
 
-Comando = CriarIntent | Parar
+Sinalizacao = Confirmar | Aprovar | Rejeitar
+Comando = CriarIntent | Parar | Sinalizacao
 Traducao = Comando | Ignorado
 
 ResultadoAtivacao = Literal["iniciada", "ja_existia", "sinalizada", "ignorada"]

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from forja.application.portas.publicador import Publicador
+from forja.application.portas.publicador import DestinoDaEntrega, PublicadorDeEntrega
 from forja.infrastructure.telemetry.metricas import MetricasForja
 
 
@@ -22,6 +22,9 @@ class EtapaEntrada:
     numero: int = 0
     titulo: str = ""
     corpo: str = ""
+    url: str = ""
+    # Artefatos já produzidos (intent.md, spec.md...), por nome; também dado, não instrução.
+    artefatos: dict[str, str] = field(default_factory=dict[str, str])
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,7 @@ class EtapaSaida:
     etapa: str
     resumo: str = ""
     texto: str = ""
+    pontos_em_aberto: int = 0
 
 
 @dataclass(frozen=True)
@@ -39,12 +43,30 @@ class PublicarEntrada:
     chave: str
 
 
+@dataclass(frozen=True)
+class ArtefatoEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    nome: str
+    conteudo: str = ""
+    etapa: str = ""
+
+
+@dataclass(frozen=True)
+class PrEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    titulo: str
+    corpo: str
+
+
 class ExecutorDeEtapa(Protocol):
     async def __call__(self, entrada: EtapaEntrada) -> EtapaSaida: ...
 
 
-async def executor_noop(entrada: EtapaEntrada) -> EtapaSaida:
-    return EtapaSaida(etapa=entrada.etapa, resumo="noop")
+DESFECHOS_CONCLUIDOS = frozenset({"concluida", "artefatos_publicados", "pr_aberto", "aprovada"})
 
 
 class DeliveryActivities:
@@ -52,9 +74,9 @@ class DeliveryActivities:
 
     def __init__(
         self,
-        executor: ExecutorDeEtapa = executor_noop,
+        executor: ExecutorDeEtapa,
         intervalo_heartbeat_s: float = 5.0,
-        publicador: Publicador | None = None,
+        publicador: PublicadorDeEntrega | None = None,
         metricas: MetricasForja | None = None,
     ) -> None:
         self._executor = executor
@@ -62,20 +84,47 @@ class DeliveryActivities:
         self._publicador = publicador
         self._metricas = metricas
 
-    @activity.defn(name="publicar_comentario")
-    async def publicar_comentario(self, entrada: PublicarEntrada) -> str:
-        """Única escrita externa do fluxo; idempotente por `chave`."""
+    def _pub(self) -> PublicadorDeEntrega:
         if self._publicador is None:
             raise ApplicationError("publicador não configurado", non_retryable=True)
-        return await self._publicador.comentar(
+        return self._publicador
+
+    @activity.defn(name="publicar_comentario")
+    async def publicar_comentario(self, entrada: PublicarEntrada) -> str:
+        """Escrita externa do fluxo; idempotente por `chave`."""
+        return await self._pub().comentar(
             entrada.repositorio, entrada.numero, entrada.corpo, entrada.chave
         )
+
+    @activity.defn(name="commitar_artefato")
+    async def commitar_artefato(self, entrada: ArtefatoEntrada) -> str:
+        info = activity.info()
+        mensagem = (
+            f"forja({entrada.etapa}): {entrada.nome}\n\n"
+            f"Intent-Id: {entrada.intent_id}\nRun-Id: {info.workflow_run_id}\n"
+            "Co-Authored-By: Forja <forja@users.noreply.github.com>"
+        )
+        destino = DestinoDaEntrega(entrada.repositorio, entrada.intent_id, entrada.slug)
+        return await self._pub().commitar_artefato(
+            destino, entrada.nome, entrada.conteudo, mensagem
+        )
+
+    @activity.defn(name="ler_artefato")
+    async def ler_artefato(self, entrada: ArtefatoEntrada) -> str:
+        """Versão da branch (um humano pode ter editado); vazio quando não há."""
+        destino = DestinoDaEntrega(entrada.repositorio, entrada.intent_id, entrada.slug)
+        return await self._pub().ler_artefato(destino, entrada.nome) or ""
+
+    @activity.defn(name="abrir_pr")
+    async def abrir_pr(self, entrada: PrEntrada) -> str:
+        destino = DestinoDaEntrega(entrada.repositorio, entrada.intent_id, entrada.slug)
+        return await self._pub().abrir_pr(destino, entrada.titulo, entrada.corpo)
 
     @activity.defn(name="registrar_desfecho")
     async def registrar_desfecho(self, desfecho: str) -> None:
         if self._metricas is None:
             return
-        if desfecho == "concluida":
+        if desfecho in DESFECHOS_CONCLUIDOS:
             self._metricas.concluidas.inc()
         elif desfecho == "erro":
             self._metricas.com_erro.inc()
