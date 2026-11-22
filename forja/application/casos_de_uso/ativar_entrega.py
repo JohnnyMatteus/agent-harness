@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from forja.application.comandos import Comando, CriarIntent, Ignorado, ResultadoAtivacao, Traducao
+from forja.application.comandos import (
+    Comando,
+    CriarIntent,
+    Ignorado,
+    Parar,
+    ResultadoAtivacao,
+    Traducao,
+)
 from forja.application.portas.entregas import EntregaGateway
 from forja.application.portas.permissoes import VerificadorPermissao
 from forja.domain.seguranca import repositorio_valido
@@ -46,7 +53,11 @@ class AtivarEntrega:
             return "ignorada"
         if isinstance(traducao, CriarIntent):
             return await self._entregas.iniciar(traducao)
-        return "sinalizada" if await self._entregas.parar(traducao.origem) else "ignorada"
+        if isinstance(traducao, Parar):
+            entregue = await self._entregas.parar(traducao.origem)
+        else:
+            entregue = await self._entregas.sinalizar(traducao)
+        return "sinalizada" if entregue else "ignorada"
 
     async def _autorizado(self, comando: Comando) -> bool:
         return await self._permissoes.tem_escrita(comando.origem.repositorio, comando.autor)

@@ -4,21 +4,37 @@ from __future__ import annotations
 
 import httpx
 from fastapi import FastAPI, Response
+from pydantic import BaseModel
 from redis.asyncio import Redis
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 from forja.application.casos_de_uso.acionar_panico import AcionarPanico
 from forja.application.casos_de_uso.ativar_entrega import AtivarEntrega
-from forja.infrastructure.agents.eco import AgenteEco
-from forja.infrastructure.agents.executor_eco import ExecutorEco
+from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
+from forja.application.portas.sdlc import PesquisaDeConhecimento
+from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
+from forja.infrastructure.agents.arquivos_git import ListadorGit
+from forja.infrastructure.agents.esquemas import AchadosSaida, IntentSaida, PlanoSaida, SpecSaida
+from forja.infrastructure.agents.estruturado import AgenteEstruturado
+from forja.infrastructure.agents.executor_sdlc import ExecutorSdlc
+from forja.infrastructure.agents.pesquisa_rag import PesquisaRag, SemPesquisa
+from forja.infrastructure.agents.sdlc import (
+    EspecificadorMultiagente,
+    InterpreteAgente,
+    PlanejadorAgente,
+    carregar_prompt,
+)
 from forja.infrastructure.github.app_auth import GitHubAppAuth
 from forja.infrastructure.github.chave_privada import carregar_chave_privada
 from forja.infrastructure.github.cliente import GitHubCliente
 from forja.infrastructure.github.config import GitHubConfig
 from forja.infrastructure.github.entregas_vistas import RegistroEntregasRedis
 from forja.infrastructure.github.publicador import PublicadorGitHub
+from forja.infrastructure.knowledge.configuracao import embedder_do_ambiente
+from forja.infrastructure.knowledge.postgres import IndicePostgres
 from forja.infrastructure.persistencia.idempotencia_redis import IdempotenciaRedis
+from forja.infrastructure.sandbox.repositorios import RepositoriosLocais
 from forja.infrastructure.telemetry.metricas import CONTENT_TYPE, MetricasForja
 from forja.infrastructure.telemetry.otel import configurar_tracing, interceptor_temporal
 from forja.infrastructure.temporal.activities import DeliveryActivities
@@ -68,12 +84,49 @@ def montar_gateway(
     return app
 
 
+def montar_pesquisa(ajustes: Ajustes) -> PesquisaDeConhecimento:
+    """RAG do M2 por código (nunca pelo MCP do agente); sem banco ou embedder, sem fontes."""
+    if not ajustes.database_url or not ajustes.embedder:
+        return SemPesquisa()
+    embedder = embedder_do_ambiente({"FORJA_EMBEDDER": ajustes.embedder})
+    return PesquisaRag(RecuperarConhecimento(IndicePostgres(ajustes.database_url), embedder))
+
+
+def montar_executor(
+    ajustes: Ajustes,
+    pesquisa: PesquisaDeConhecimento | None = None,
+    cliente: ClienteSdk | None = None,
+) -> ExecutorSdlc:
+    """Agentes do SDLC, todos sem ferramenta (ADR 0036). `cliente` é o ponto de injeção do SDK."""
+
+    def agente[S: BaseModel](prompt: str, schema: type[S]) -> AgenteEstruturado[S]:
+        runner = (
+            AgentSdkRunner(carregar_prompt(prompt), cliente, ajustes.modelo)
+            if cliente
+            else AgentSdkRunner(carregar_prompt(prompt), modelo=ajustes.modelo)
+        )
+        return AgenteEstruturado(runner, schema, prompt)
+
+    especificador = EspecificadorMultiagente(
+        pesquisa or montar_pesquisa(ajustes),
+        agente("pesquisador", AchadosSaida),
+        agente("spec", SpecSaida),
+    )
+    planejador = PlanejadorAgente(
+        agente("planner", PlanoSaida), ListadorGit(RepositoriosLocais(ajustes.repos_dir))
+    )
+    return ExecutorSdlc(
+        InterpreteAgente(agente("interprete", IntentSaida)), especificador, planejador
+    )
+
+
 def montar_worker(
     ajustes: Ajustes, client: Client, redis: Redis, metricas: MetricasForja
 ) -> Worker:
     cfg = GitHubConfig()  # type: ignore[call-arg]
     github, _ = _github(cfg)
-    eco = AgenteEco.com_sdk()
     publicador = PublicadorGitHub(github, IdempotenciaRedis(redis), dry_run=not ajustes.publicar)
-    atividades = DeliveryActivities(ExecutorEco(eco), publicador=publicador, metricas=metricas)
+    atividades = DeliveryActivities(
+        montar_executor(ajustes), publicador=publicador, metricas=metricas
+    )
     return criar_worker(client, atividades)

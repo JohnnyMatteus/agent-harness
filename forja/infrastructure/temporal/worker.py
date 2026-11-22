@@ -10,9 +10,17 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 from temporalio.worker import Interceptor, Worker
 
-from forja.application.comandos import CriarIntent, OrigemExterna
+from forja.application.comandos import (
+    Aprovar,
+    Confirmar,
+    CriarIntent,
+    OrigemExterna,
+    Rejeitar,
+    Sinalizacao,
+)
 from forja.application.portas.entregas import ResultadoInicio
 from forja.domain.intent import Origem, TipoDeOrigem, intent_id_de
+from forja.infrastructure.github.cliente import slugificar
 from forja.infrastructure.temporal.activities import DeliveryActivities
 from forja.infrastructure.temporal.workflows import (
     DeliveryEntrada,
@@ -27,17 +35,24 @@ LIMITE_CORPO = 8000
 
 def criar_worker(
     client: Client,
-    activities: DeliveryActivities | None = None,
+    activities: DeliveryActivities,
     task_queue: str = FILA_PADRAO,
     interceptors: Sequence[Interceptor] = (),
     max_cached_workflows: int = 1000,
 ) -> Worker:
-    ativ = activities or DeliveryActivities()
+    ativ = activities
     return Worker(
         client,
         task_queue=task_queue,
         workflows=[DeliveryWorkflow],
-        activities=[ativ.executar_etapa, ativ.publicar_comentario, ativ.registrar_desfecho],
+        activities=[
+            ativ.executar_etapa,
+            ativ.publicar_comentario,
+            ativ.commitar_artefato,
+            ativ.ler_artefato,
+            ativ.abrir_pr,
+            ativ.registrar_desfecho,
+        ],
         interceptors=list(interceptors),
         max_cached_workflows=max_cached_workflows,
     )
@@ -86,6 +101,9 @@ class TemporalEntregaGateway:
             repositorio=comando.origem.repositorio,
             numero=comando.origem.numero,
             titulo=comando.titulo[:300],
+            slug=slugificar(comando.titulo),
+            url=comando.origem.url,
+            solicitantes=[a.lower() for a in (comando.autor, comando.autor_da_issue) if a],
             corpo=comando.corpo[:LIMITE_CORPO],
         )
         _, novo = await iniciar_ou_sinalizar(self._client, entrada, self._fila)
@@ -95,6 +113,22 @@ class TemporalEntregaGateway:
         handle = self._client.get_workflow_handle(self._id(origem))
         try:
             await handle.signal(DeliveryWorkflow.parar)
+        except RPCError:
+            return False
+        return True
+
+    async def sinalizar(self, comando: Sinalizacao) -> bool:
+        handle = self._client.get_workflow_handle(self._id(comando.origem))
+        try:
+            match comando:
+                case Confirmar():
+                    await handle.signal(DeliveryWorkflow.confirmar, comando.autor)
+                case Aprovar():
+                    await handle.signal(DeliveryWorkflow.aprovar, comando.autor)
+                case Rejeitar():
+                    await handle.signal(
+                        DeliveryWorkflow.rejeitar, args=[comando.autor, comando.motivo]
+                    )
         except RPCError:
             return False
         return True

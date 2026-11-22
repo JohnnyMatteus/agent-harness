@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from forja.application.casos_de_uso.acionar_panico import AcionarPanico
 from forja.application.casos_de_uso.ativar_entrega import AtivarEntrega
-from forja.application.comandos import CriarIntent, OrigemExterna
+from forja.application.comandos import CriarIntent, OrigemExterna, Sinalizacao
 from forja.application.portas.entregas import ResultadoInicio
 from forja.infrastructure.github.assinatura import assinar
 from forja.infrastructure.github.entregas_vistas import RegistroEntregasRedis
@@ -30,6 +30,9 @@ class Entregas:
             raise RuntimeError("temporal fora")
         self.iniciadas.append(comando)
         return "iniciada"
+
+    async def sinalizar(self, comando: Sinalizacao) -> bool:
+        return True
 
     async def parar(self, origem: OrigemExterna) -> bool:
         return True

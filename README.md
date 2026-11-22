@@ -8,7 +8,7 @@ Harness autônomo de engenharia com RAG: a infraestrutura em volta do modelo que
 
 Em times com agentes de código, o gargalo deixou de ser escrever código e passou a ser planejar, revisar e entregar. Sem estrutura, o agente perde contexto entre sessões, ninguém sabe por que uma mudança foi feita e não há como limitar o que ele pode fazer sozinho. A Forja transforma uma issue em uma entrega rastreável: cada etapa produz um artefato versionado (`intent.md`, `spec.md`, `plan.md`, `review.md`), humanos decidem onde o risco exige, e a cadeia de commits serve de auditoria.
 
-## Estado atual (M1 fechado)
+## Estado atual (M1 e M3)
 
 | Pronto | Em andamento em outras branches |
 | --- | --- |
@@ -22,7 +22,9 @@ Em times com agentes de código, o gargalo deixou de ser escrever código e pass
 | Binário `forja serve` e `forja worker` (ADR 0033): webhook verificado, `DeliveryWorkflow`, agente eco sem ferramenta e com ambiente isolado (ADR 0036), comentário publicado só pelo workflow (dry-run por padrão, ADR 0034), trace único e `/metrics` | |
 | Teste de integração ponta a ponta com GitHub falso (`tests/integracao/`); o isolamento do SDK tem teste do comando e do ambiente efetivos | |
 
-RAG, política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
+| M3, SDLC até o PR: Intérprete, Spec (pesquisadores em paralelo sobre o RAG do M2, citação obrigatória), Planner, artefatos em `.forja/<intent-id>/`, portão de spec por `/forja approve` e `/forja reject`, PR em rascunho (ADRs 0037 e 0038); teste ponta a ponta em `tests/integracao/test_sdlc_ponta_a_ponta.py` | |
+
+RAG (M2) está na main; política de risco, evals e o harness de longa duração ficam para os marcos seguintes (ver [Próximos passos](#próximos-passos)).
 
 ## Arquitetura
 
@@ -139,7 +141,7 @@ Todas em [docs/adr/](docs/adr/README.md). As que moldam este repositório:
 ## Próximos passos
 
 - Agentes com ferramenta (M3/M4) rodam o CLI dentro do sandbox (modo `docker` do lançador, ADR 0036): a imagem com o CLI e o modo ainda não foram exercitados contra Docker real.
-- Aprovação humana com rejeição (hoje não há aresta no diagrama).
+- Rejeição como aresta da máquina de estados: hoje a rejeição encerra o workflow (ADR 0038); decisão do autor.
 - Política de risco e hooks (M5) e evals contínuos (M8).
 - Knowledge (M2) pendente: adaptador de embedding real (hoje só o falso, e só por escolha explícita), reranker, prefixo de contexto gerado por modelo (ADR 0013), `similar_incidents` e `related_prs`, indexação disparada por webhook, fidelidade e latência p95 no eval.
 - Helm e implantação em cluster.

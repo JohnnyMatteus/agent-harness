@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 ResultadoPublicacao = Literal["publicado", "ja_publicado", "dry_run"]
@@ -16,6 +17,27 @@ class Publicador(Protocol):
         self, repositorio: str, numero: int, corpo: str, chave: str
     ) -> ResultadoPublicacao:
         """Comenta na issue no máximo uma vez por `chave`, mesmo com retentativas."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class DestinoDaEntrega:
+    """Onde a entrega escreve: a branch é derivada de (intent_id, slug), nunca informada."""
+
+    repositorio: str
+    intent_id: str
+    slug: str
+
+
+class PublicadorDeEntrega(Publicador, Protocol):
+    async def commitar_artefato(
+        self, destino: DestinoDaEntrega, nome: str, conteudo: str, mensagem: str
+    ) -> ResultadoPublicacao: ...
+
+    async def ler_artefato(self, destino: DestinoDaEntrega, nome: str) -> str | None: ...
+
+    async def abrir_pr(self, destino: DestinoDaEntrega, titulo: str, corpo: str) -> str:
+        """URL do PR; "dry-run" quando nada foi escrito."""
         ...
 
 

@@ -42,3 +42,9 @@ def neutralizar_texto(texto: str, limite: int = LIMITE_COMENTARIO) -> str:
     if len(seguro) > limite:
         return seguro[: limite - 1] + "…"
     return seguro
+
+
+def dado_nao_confiavel(texto: str) -> str:
+    """Texto externo dentro de um prompt: `<` e `>` viram aspas angulares tipográficas, então
+    nenhum fragmento consegue fechar a tag que o delimita nem abrir outra."""
+    return texto.replace("<", "\u2039").replace(">", "\u203a")

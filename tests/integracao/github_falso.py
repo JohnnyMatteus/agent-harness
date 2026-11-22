@@ -13,7 +13,17 @@ class GitHubFalso:
         self.permissao = permissao
         self.comentarios: list[dict[str, Any]] = []
         self.requisicoes: list[tuple[str, str]] = []
+        self.branches: set[str] = set()
+        self.arquivos: dict[tuple[str, str], dict[str, str]] = {}
+        self.commits: list[dict[str, Any]] = []
+        self.prs: list[dict[str, Any]] = []
+        self.falhar_leitura = False
         self.app = self._criar_app()
+
+    def arquivo(self, branch: str, caminho: str) -> str:
+        import base64
+
+        return base64.b64decode(self.arquivos[(branch, caminho)]["content"]).decode()
 
     def cliente_http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -47,5 +57,57 @@ class GitHubFalso:
                 raise HTTPException(422)
             self.comentarios.append({"repo": f"{dono}/{nome}", "numero": numero, **corpo})
             return {"id": len(self.comentarios)}
+
+        @app.get("/repos/{dono}/{nome}")
+        async def repo(dono: str, nome: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+            return {"default_branch": "main"}
+
+        @app.get("/repos/{dono}/{nome}/git/ref/heads/{ref:path}")
+        async def ref(dono: str, nome: str, ref: str) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            return {"object": {"sha": "a" * 40}}
+
+        @app.post("/repos/{dono}/{nome}/git/refs", status_code=201)
+        async def criar_ref(dono: str, nome: str, request: Request) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+            ref = (await request.json())["ref"].removeprefix("refs/heads/")
+            if ref in self.branches:
+                raise HTTPException(422, "Reference already exists")
+            if ref == "main":
+                raise HTTPException(403, "branch protegida")
+            self.branches.add(ref)
+            return {"ref": ref}
+
+        @app.get("/repos/{dono}/{nome}/contents/{caminho:path}")
+        async def ler(dono: str, nome: str, caminho: str, ref: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+            if self.falhar_leitura:
+                raise HTTPException(500)
+            achado = self.arquivos.get((ref, caminho))
+            if achado is None:
+                raise HTTPException(404)
+            return achado
+
+        @app.put("/repos/{dono}/{nome}/contents/{caminho:path}")
+        async def escrever(dono: str, nome: str, caminho: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            c = await request.json()
+            if c["branch"] not in self.branches:
+                raise HTTPException(404, "branch inexistente")
+            self.arquivos[(c["branch"], caminho)] = {
+                "content": c["content"],
+                "sha": f"s{len(self.commits)}",
+            }
+            self.commits.append(
+                {"branch": c["branch"], "caminho": caminho, "message": c["message"]}
+            )
+            return {"commit": {"sha": "c" * 40}}
+
+        @app.get("/repos/{dono}/{nome}/pulls")
+        async def listar_prs(dono: str, nome: str, head: str) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
+            return [p for p in self.prs if f"{dono}:{p['head']}" == head]
+
+        @app.post("/repos/{dono}/{nome}/pulls", status_code=201)
+        async def criar_pr(dono: str, nome: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+            pr = await request.json()
+            pr["html_url"] = f"https://github.test/{dono}/{nome}/pull/{len(self.prs) + 1}"
+            self.prs.append(pr)
+            return pr
 
         return app

@@ -28,5 +28,9 @@ class MetricasForja:
             "forja_custo_usd_total", "Custo estimado de sessões", registry=self.registry
         )
 
+        self.tokens = Counter(
+            "forja_tokens_total", "Tokens das sessões", ["direcao"], registry=self.registry
+        )
+
     def exportar(self) -> bytes:
         return generate_latest(self.registry)

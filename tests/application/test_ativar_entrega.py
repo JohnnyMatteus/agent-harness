@@ -8,6 +8,7 @@ from forja.application.comandos import (
     OrigemExterna,
     Parar,
     ResultadoAtivacao,
+    Sinalizacao,
 )
 from forja.application.portas.entregas import ResultadoInicio
 
@@ -18,6 +19,7 @@ class EntregasFalsas:
     def __init__(self) -> None:
         self.iniciadas: set[str] = set()
         self.paradas: list[str] = []
+        self.sinais: list[Sinalizacao] = []
         self.em_andamento = 3
 
     async def iniciar(self, comando: CriarIntent) -> ResultadoInicio:
@@ -25,6 +27,10 @@ class EntregasFalsas:
             return "ja_existia"
         self.iniciadas.add(comando.origem.referencia)
         return "iniciada"
+
+    async def sinalizar(self, comando: Sinalizacao) -> bool:
+        self.sinais.append(comando)
+        return comando.origem.referencia in self.iniciadas
 
     async def parar(self, origem: OrigemExterna) -> bool:
         if origem.referencia not in self.iniciadas:
@@ -111,3 +117,21 @@ async def test_nome_de_repositorio_malformado_e_ignorado() -> None:
     ruim = CriarIntent(OrigemExterna("../etc/passwd", 1, "u"), "t", "c", "maria")
     assert await ativar.executar(ruim) == "ignorada"
     assert not entregas.iniciadas
+
+
+async def test_confirmacao_aprovacao_e_rejeicao_viram_sinais_so_de_quem_escreve() -> None:
+    from forja.application.comandos import Aprovar, Confirmar, Rejeitar
+
+    ativar, entregas = caso()
+    await ativar.executar(CRIAR)
+    for comando in (
+        Confirmar(ORIGEM, "maria"),
+        Aprovar(ORIGEM, "maria"),
+        Rejeitar(ORIGEM, "maria", "x"),
+    ):
+        assert await ativar.executar(comando) == "sinalizada"
+    assert len(entregas.sinais) == 3
+    assert await ativar.executar(Aprovar(ORIGEM, "intruso")) == "ignorada"
+    assert len(entregas.sinais) == 3
+    sem_entrega = Confirmar(OrigemExterna("acme-demo/loja-exemplo", 99, "u"), "maria")
+    assert await ativar.executar(sem_entrega) == "ignorada"

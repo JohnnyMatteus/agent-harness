@@ -95,3 +95,28 @@ async def test_permissao_de_escrita(fixture_json: Callable[[str], Any]) -> None:
             assert await cliente.tem_escrita(REPO, "maria-dev")
             assert not await cliente.tem_escrita(REPO, "leitor")
             assert not await cliente.tem_escrita(REPO, "estranho")
+
+
+async def test_leitura_de_arquivo_distingue_ausencia_erro_e_tamanho_absurdo() -> None:
+    import base64
+
+    from forja.domain.artefatos import TETO_DE_ARTEFATO, ArtefatoInvalido
+    from forja.infrastructure.github.erros import GitHubApiError
+
+    url = f"/repos/{REPO}/contents/.forja/x/spec.md"
+    async with httpx.AsyncClient(base_url="https://api.github.com") as http:
+        cliente = GitHubCliente(AuthFalso(), http)
+        with respx.mock(base_url="https://api.github.com") as mock:
+            rota = mock.get(url)
+            rota.respond(404)
+            assert await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md") is None
+            rota.respond(500)
+            with pytest.raises(GitHubApiError):
+                await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md")
+            grande = base64.b64encode(b"a" * (TETO_DE_ARTEFATO + 1)).decode()
+            rota.respond(200, json={"content": grande, "sha": "s", "size": TETO_DE_ARTEFATO + 1})
+            with pytest.raises(ArtefatoInvalido):
+                await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md")
+            ok = base64.b64encode(b"oi").decode()
+            rota.respond(200, json={"content": ok, "sha": "s", "size": 2})
+            assert await cliente.ler_arquivo(REPO, "forja/x", ".forja/x/spec.md") == "oi"

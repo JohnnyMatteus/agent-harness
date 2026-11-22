@@ -11,10 +11,19 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from forja.application.comandos import CriarIntent, Ignorado, OrigemExterna, Parar, Traducao
+from forja.application.comandos import (
+    Aprovar,
+    Confirmar,
+    CriarIntent,
+    Ignorado,
+    OrigemExterna,
+    Parar,
+    Rejeitar,
+    Traducao,
+)
 
 LABEL_INTENT = "forja:intent"
-_COMANDO = re.compile(r"^/forja\s+(\S+)\s*$", re.IGNORECASE)
+_COMANDO = re.compile(r"^/forja\s+(\S+)(?:[ \t]+(.{0,500}?))?\s*$", re.IGNORECASE)
 
 
 class _Modelo(BaseModel):
@@ -36,6 +45,7 @@ class _Issue(_Modelo):
     body: str | None = None
     html_url: str
     pull_request: dict[str, Any] | None = None
+    user: _Usuario | None = None
 
 
 class _Label(_Modelo):
@@ -88,6 +98,7 @@ def _traduzir_issue(payload: dict[str, Any]) -> Traducao:
         titulo=evento.issue.title,
         corpo=evento.issue.body or "",
         autor=evento.sender.login,
+        autor_da_issue=evento.issue.user.login if evento.issue.user else "",
     )
 
 
@@ -100,21 +111,29 @@ def _traduzir_comentario(payload: dict[str, Any]) -> Traducao:
         return Ignorado("comentário não criado")
     if evento.comment.user.type == "Bot":
         return Ignorado("comentário de bot")
-    comando = _extrair_comando(evento.comment.body)
-    if comando is None:
+    achado = _extrair_comando(evento.comment.body)
+    if achado is None:
         return Ignorado("comentário sem comando /forja")
-    if comando == "stop":
-        return Parar(
-            origem=_origem(evento.repository, evento.issue), autor=evento.comment.user.login
-        )
-    return Ignorado(f"comando desconhecido: {comando[:32]}")
+    comando, argumento = achado
+    origem, autor = _origem(evento.repository, evento.issue), evento.comment.user.login
+    match comando:
+        case "stop":
+            return Parar(origem=origem, autor=autor)
+        case "confirm":
+            return Confirmar(origem=origem, autor=autor)
+        case "approve":
+            return Aprovar(origem=origem, autor=autor)
+        case "reject":
+            return Rejeitar(origem=origem, autor=autor, motivo=argumento)
+        case _:
+            return Ignorado(f"comando desconhecido: {comando[:32]}")
 
 
-def _extrair_comando(corpo: str) -> str | None:
+def _extrair_comando(corpo: str) -> tuple[str, str] | None:
     for linha in corpo.splitlines():
         achado = _COMANDO.match(linha.strip())
         if achado:
-            return achado.group(1).lower()
+            return achado.group(1).lower(), (achado.group(2) or "").strip()
     return None
 
 
