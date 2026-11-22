@@ -380,3 +380,17 @@ async def test_politica_pr_pronto_e_merge_do_cliente() -> None:
                 await c.mesclar_pr(REPO, 7, SHA)
             merge.respond(200, json={"merged": True})
             await c.mesclar_pr(REPO, 7, SHA)
+
+
+async def test_issues_abertas_ignoram_prs_e_a_lista_cortada_nao_vale() -> None:
+    cliente, mock, http = await _com_github({})
+    rota = mock.get(f"/repos/{REPO}/issues")
+    try:
+        rota.respond(200, json=[{"title": "a"}, {"title": "pr", "pull_request": {}}])
+        assert await cliente.titulos_de_issues_abertas(REPO, "forja:incident") == ["a"]
+        assert "labels=forja%3Aincident" in str(rota.calls.last.request.url)
+        rota.respond(200, json=[{"title": str(i)} for i in range(100)])  # sempre cheia
+        with pytest.raises(ValueError, match="teto"):
+            await cliente.titulos_de_issues_abertas(REPO, "forja:incident")
+    finally:
+        await _fim(mock, http)

@@ -1,10 +1,12 @@
-"""Leitor estrito de um subconjunto de YAML, para `.forja/policy.yaml` e `.forja/bands.yaml`.
+"""Leitor estrito de um subconjunto de YAML, para `.forja/policy.yaml` e o arquivo de bandas
+do operador.
 
-O arquivo vem do repositório-alvo (conteúdo não confiável). Aceita só: mapeamentos e listas em
-blocos (indentação de espaços), listas de escalares em linha (`[a, "b"]`) e escalares (texto,
-aspas, número, true/false/null). Recusa âncoras, tags, documentos múltiplos, blocos `|`/`>`,
-tabulação e aninhamento acima de 8 níveis. Não há dependência YAML no projeto: quando houver
-(PyYAML com `safe_load`), este módulo sai. Decisão registrada no ADR 0042.
+O arquivo pode vir do repositório-alvo (policy.yaml: conteúdo não confiável). Aceita só:
+mapeamentos e listas em blocos (indentação de espaços), listas de escalares em linha
+(`[a, "b"]`) e escalares (texto, aspas, número, true/false/null). Recusa âncoras, tags,
+documentos múltiplos, blocos `|`/`>`, tabulação e aninhamento acima de 8 níveis. Não há
+dependência YAML no projeto: quando houver (PyYAML com `safe_load`), este módulo sai.
+Decisão registrada no ADR 0042.
 """
 
 from __future__ import annotations

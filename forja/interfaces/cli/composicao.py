@@ -28,9 +28,11 @@ from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
 from forja.infrastructure.agents.arquivos_git import ListadorGit
 from forja.infrastructure.agents.avaliador import AvaliadorNaMessagesApi
 from forja.infrastructure.agents.contexto import estrategia_do_modelo
+from forja.infrastructure.agents.diagnostico import DiagnosticoMultiagente
 from forja.infrastructure.agents.esquemas import (
     AchadosSaida,
     ContratoSaida,
+    IncidenteSaida,
     InicializacaoSaida,
     IntentSaida,
     PlanoSaida,
@@ -64,9 +66,12 @@ from forja.infrastructure.sandbox.docker import ConfigDocker, DockerSandbox
 from forja.infrastructure.sandbox.remoto_git import RemotoGitHub
 from forja.infrastructure.sandbox.repositorios import RepositoriosLocais
 from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
+from forja.infrastructure.telemetry.bandas_do_operador import BandasDoOperador, LeituraComposta
 from forja.infrastructure.telemetry.metricas import CONTENT_TYPE, MetricasForja
 from forja.infrastructure.telemetry.otel import configurar_tracing, interceptor_temporal
+from forja.infrastructure.telemetry.prometheus import PrometheusHttp, validar_url_do_prometheus
 from forja.infrastructure.temporal.activities import DeliveryActivities
+from forja.infrastructure.temporal.operacao import AtividadesDeOperacao
 from forja.infrastructure.temporal.worker import TemporalEntregaGateway, criar_worker
 from forja.interfaces.cli.ajustes import Ajustes
 from forja.interfaces.http.app import criar_app
@@ -249,6 +254,55 @@ def montar_revisao(
     return RevisarEntrega(revisores, github)
 
 
+def montar_diagnostico(
+    ajustes: Ajustes, pesquisa: PesquisaDeConhecimento, cliente: ClienteSdk | None = None
+) -> DiagnosticoMultiagente:
+    """Líder do diagnóstico: sem ferramenta, como os demais agentes (ADR 0036)."""
+    prompt = carregar_prompt("diagnostico")
+    runner = (
+        AgentSdkRunner(prompt, cliente, ajustes.modelo)
+        if cliente
+        else AgentSdkRunner(prompt, modelo=ajustes.modelo)
+    )
+    return DiagnosticoMultiagente(
+        pesquisa, AgenteEstruturado(runner, IncidenteSaida, "diagnostico")
+    )
+
+
+def montar_operacao(
+    ajustes: Ajustes,
+    github: GitHubCliente,
+    publicador: PublicadorGitHub,
+    cliente: ClienteSdk | None = None,
+    metricas: MetricasForja | None = None,
+) -> AtividadesDeOperacao | None:
+    """Maintain (M6). Desligado sem FORJA_MONITOR_REPOS; ligado, exige URL do Prometheus e o
+    diretório de bandas do operador, e só monitora repositório habilitado. A issue do incidente
+    segue o dry-run do publicador (FORJA_PUBLICAR); nenhuma ação corretiva é automática."""
+    if not ajustes.monitor_repos:
+        return None
+    if not ajustes.prometheus_url or ajustes.bandas_dir is None:
+        raise ConfiguracaoInvalida(
+            "FORJA_MONITOR_REPOS exige FORJA_PROMETHEUS_URL e FORJA_BANDAS_DIR (do operador)"
+        )
+    fora = sorted(set(ajustes.monitor_repos) - set(ajustes.repos_habilitados))
+    if fora:
+        raise ConfiguracaoInvalida(f"FORJA_MONITOR_REPOS fora de FORJA_REPOS_HABILITADOS: {fora}")
+    try:
+        base = validar_url_do_prometheus(ajustes.prometheus_url)
+    except ValueError as erro:
+        raise ConfiguracaoInvalida(str(erro)) from erro
+    http = httpx.AsyncClient(base_url=base, timeout=15.0, follow_redirects=False)
+    return AtividadesDeOperacao(
+        LeituraComposta(BandasDoOperador(ajustes.bandas_dir), github),
+        PrometheusHttp(http),
+        montar_diagnostico(ajustes, montar_pesquisa(ajustes), cliente),
+        publicador,
+        frozenset(ajustes.monitor_repos),
+        telemetria=metricas,
+    )
+
+
 def montar_catalogo_de_skills(github: GitHubCliente) -> CatalogoDeSkills:
     return CatalogoDeSkills(
         SkillsPadrao(), SkillsDoRepositorio(github.ler_arquivo, github.branch_padrao)
@@ -273,4 +327,6 @@ def montar_worker(
         leitura=github,
         escrita=publicador,
     )
-    return criar_worker(client, atividades)
+    return criar_worker(
+        client, atividades, operacao=montar_operacao(ajustes, github, publicador, metricas=metricas)
+    )

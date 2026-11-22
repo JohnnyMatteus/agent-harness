@@ -137,3 +137,10 @@ class RevisaoDeModeloSaida(_Saida):
     achados: list[AchadoDoRevisorSaida] = Field(
         default_factory=list[AchadoDoRevisorSaida], max_length=30
     )
+
+
+class IncidenteSaida(_Saida):
+    hipotese: str = Field(min_length=1, max_length=800)
+    proposta: str = Field(min_length=1, max_length=800)
+    achados: list[str] = Field(default_factory=list[str], max_length=15)
+    fontes: list[str] = Field(default_factory=list[str], max_length=15)

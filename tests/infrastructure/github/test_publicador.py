@@ -182,6 +182,16 @@ class ClienteDeRevisaoGravador:
     async def mesclar_pr(self, repositorio, numero, sha):
         self.merges.append((numero, sha))
 
+    async def titulos_de_issues_abertas(self, repositorio, rotulo):
+        if getattr(self, "listagem_falha", False):
+            raise RuntimeError("github fora")
+        return list(getattr(self, "titulos_abertos", []))
+
+    async def criar_issue(self, repositorio, titulo, corpo, rotulos):
+        self.issues = getattr(self, "issues", [])
+        self.issues.append((titulo, corpo, rotulos))
+        return "https://github.test/issues/1"
+
 
 def _publicador_de_revisao(dry_run=False):
     cliente = ClienteDeRevisaoGravador()
@@ -241,3 +251,36 @@ async def test_merge_e_pr_pronto_so_com_destino_valido_idempotentes_e_em_dry_run
     assert await seco.marcar_pr_pronto("a/b", 7, "k") == "dry_run"
     assert await seco.check_run("a/b", SHA, "x", [], "r", "k") == "dry_run"
     assert (cliente2.merges, cliente2.prontos, cliente2.checks) == ([], [], [])
+
+
+async def test_incidente_abre_issue_com_label_de_incidente_uma_vez_e_em_dry_run_nao_abre() -> None:
+    pub, cliente = _publicador_de_revisao()
+    url = await pub.abrir("a/b", "Incidente @dono ![](https://evil/?d=1)", "corpo @x", "k1")
+    assert url == "https://github.test/issues/1" and len(cliente.issues) == 1
+    titulo, corpo, rotulos = cliente.issues[0]
+    assert rotulos == ["forja:incident"]  # nunca forja:intent: quem aplica é um humano
+    assert "://" not in titulo and "@dono" not in titulo and "@x" not in corpo
+    assert "ja_aberta" in await pub.abrir("a/b", "t", "c", "k1")  # a mesma chave não duplica
+    assert len(cliente.issues) == 1
+    seco, c2 = _publicador_de_revisao(dry_run=True)
+    assert await seco.abrir("a/b", "t", "c", "k") == "dry-run" and not hasattr(c2, "issues")
+    with pytest.raises(ValueError, match="inválido"):
+        await pub.abrir("../x", "t", "c", "k2")
+
+
+async def test_nao_abre_outra_issue_de_incidente_enquanto_houver_uma_aberta_da_mesma_banda() -> (
+    None
+):
+    pub, cliente = _publicador_de_revisao()
+    cliente.titulos_abertos = ["Incidente: banda lat violada"]  # pyright: ignore
+    r = await pub.abrir("a/b", "Incidente: banda lat violada", "corpo", "k-nova")
+    assert r.startswith("nao_aberta") and not hasattr(cliente, "issues")
+    # outra banda, ou a anterior já fechada: abre
+    assert (await pub.abrir("a/b", "Incidente: banda dlq violada", "c", "k2")).startswith("https")
+
+
+async def test_se_nao_consegue_listar_as_issues_abertas_nao_abre() -> None:
+    pub, cliente = _publicador_de_revisao()
+    cliente.listagem_falha = True  # pyright: ignore
+    r = await pub.abrir("a/b", "Incidente: banda lat violada", "corpo", "k1")
+    assert r.startswith("nao_aberta") and not hasattr(cliente, "issues")

@@ -44,6 +44,7 @@ Decisões iniciais do [design doc](../design-doc.md) (seção 13), no formato de
 | [0042](0042-politica-de-risco-e-leitor-yaml-estrito.md) | local | Política de risco como código e leitor de YAML estrito (decisão de formato pendente) | M5 |
 | [0043](0043-revisao-paralela-check-runs-e-decisao-de-deploy.md) | local | Revisão paralela, check runs, auto-merge por tier e orçamento | M5 |
 | [0044](0044-skills-da-organizacao-com-divulgacao-progressiva.md) | local | Skills da organização com divulgação progressiva | M5 |
+| [0045](0045-maintain-bandas-monitor-e-incidentes.md) | local | Maintain: bandas, monitor e incidentes (parcial, sem ligação ao binário) | M6 |
 
 F-08 e F-16 se sobrepõem (os dois tratam do sandbox); foram mantidos separados porque o design doc os lista separados. O autor pode fundi-los ao aceitar.
 
