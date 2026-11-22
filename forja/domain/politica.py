@@ -7,11 +7,9 @@ tocados, labels e achados dos revisores.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from functools import lru_cache
 from typing import Any, cast
 
 from forja.domain.erros import ErroDeDominio
@@ -31,31 +29,71 @@ class Tier(IntEnum):
         return self is not Tier.BAIXO
 
 
-@lru_cache(maxsize=256)
-def _regex_do_glob(padrao: str) -> re.Pattern[str]:
-    saida: list[str] = []
+_LITERAL, _UM, _ESTRELA, _QUALQUER, _DIRETORIOS = range(5)
+MAX_PADRAO = 200
+MAX_CAMINHO = 400
+MAX_CAMINHO_DO_GLOB = 4096
+
+
+def _tokens(padrao: str) -> list[tuple[int, str]]:
+    """`**/` casa zero ou mais diretórios, `**` casa qualquer coisa (inclusive `/`), `*` casa
+    qualquer coisa menos `/`, `?` um caractere menos `/`: a semântica do `policy.yaml` desde o
+    início, preservada (`deploy/**.tf` casa `deploy/prod/main.tf`)."""
+    saida: list[tuple[int, str]] = []
     i = 0
     while i < len(padrao):
         if padrao.startswith("**/", i):
-            saida.append("(?:.*/)?")
+            saida.append((_DIRETORIOS, ""))
             i += 3
         elif padrao.startswith("**", i):
-            saida.append(".*")
+            saida.append((_QUALQUER, ""))
             i += 2
         elif padrao[i] == "*":
-            saida.append("[^/]*")
+            saida.append((_ESTRELA, ""))
             i += 1
         elif padrao[i] == "?":
-            saida.append("[^/]")
+            saida.append((_UM, ""))
             i += 1
         else:
-            saida.append(re.escape(padrao[i]))
+            saida.append((_LITERAL, padrao[i]))
             i += 1
-    return re.compile("".join(saida))
+    return saida
 
 
 def casar_glob(padrao: str, caminho: str) -> bool:
-    return _regex_do_glob(padrao).fullmatch(caminho) is not None
+    """Casamento linear por programação dinâmica, O(P*N), sem regex e sem backtracking: o padrão é
+    do repositório-alvo e uma regex com `**` encadeados teria custo exponencial."""
+    if len(padrao) > MAX_PADRAO or len(caminho) > MAX_CAMINHO_DO_GLOB:
+        return False
+    tokens = _tokens(padrao)
+    n = len(caminho)
+    # proximo[j]: tokens[i+1:] casam caminho[j:]
+    proximo = [False] * (n + 1)
+    proximo[n] = True
+    for tipo, c in reversed(tokens):
+        atual = [False] * (n + 1)
+        if tipo == _LITERAL:
+            for j in range(n):
+                atual[j] = caminho[j] == c and proximo[j + 1]
+        elif tipo == _UM:
+            for j in range(n):
+                atual[j] = caminho[j] != "/" and proximo[j + 1]
+        elif tipo == _ESTRELA:
+            atual[n] = proximo[n]
+            for j in range(n - 1, -1, -1):
+                atual[j] = proximo[j] or (caminho[j] != "/" and atual[j + 1])
+        elif tipo == _QUALQUER:
+            atual[n] = proximo[n]
+            for j in range(n - 1, -1, -1):
+                atual[j] = proximo[j] or atual[j + 1]
+        else:  # (.*/)?
+            achou = [False] * (n + 1)  # existe k >= j com caminho[k] == "/" e proximo[k + 1]
+            for j in range(n - 1, -1, -1):
+                achou[j] = (caminho[j] == "/" and proximo[j + 1]) or achou[j + 1]
+            for j in range(n + 1):
+                atual[j] = proximo[j] or achou[j]
+        proximo = atual
+    return proximo[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +124,11 @@ class Politica:
         return cls()
 
     def classificar(
-        self, caminhos: Iterable[str], labels: Iterable[str], linhas_alteradas: int
+        self,
+        caminhos: Iterable[str],
+        labels: Iterable[str],
+        linhas_alteradas: int,
+        intent_id: str | None = None,
     ) -> Classificacao:
         motivos: list[str] = []
         tier = Tier.BAIXO
@@ -97,7 +139,7 @@ class Politica:
             motivos.append("sem policy.yaml: nada é baixo risco")
             tier = Tier.ALTO
         for caminho in lista:
-            atual, motivo = self._de_um_caminho(caminho)
+            atual, motivo = self._de_um_caminho(caminho, intent_id)
             if atual > Tier.BAIXO:
                 motivos.append(f"{caminho}: {motivo}")
             tier = max(tier, atual)
@@ -115,7 +157,15 @@ class Politica:
             tier = Tier.ALTO
         return Classificacao(tier, tuple(motivos))
 
-    def _de_um_caminho(self, caminho: str) -> tuple[Tier, str]:
+    def _de_um_caminho(self, caminho: str, intent_id: str | None = None) -> tuple[Tier, str]:
+        # Independente da política (que é do repositório): o que muda a régua ou os checks é alto.
+        if len(caminho) > MAX_CAMINHO:
+            return Tier.ALTO, f"caminho acima de {MAX_CAMINHO} caracteres"
+        if caminho.startswith(".github/") or caminho == ".github":
+            return Tier.ALTO, "muda o CI (.github): sempre alto risco"
+        propria = f".forja/{intent_id}/" if intent_id else None
+        if caminho.startswith(".forja/") and not (propria and caminho.startswith(propria)):
+            return Tier.ALTO, "muda a política ou os checks (.forja): sempre alto risco"
         if any(casar_glob(p, caminho) for p in self.altos_paths):
             return Tier.ALTO, "caminho de alto risco"
         if any(casar_glob(p, caminho) for p in self.baixos_paths):

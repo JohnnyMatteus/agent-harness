@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from forja.application.casos_de_uso.memoria_do_repositorio import MemoriaDoRepositorio
+from forja.application.casos_de_uso.skills import CatalogoDeSkills
 from forja.application.portas.agente import LimitesSessao, PedidoAgente, UsoModelo
 from forja.application.portas.harness import PlanoInicial, PropostaDeContrato, ResultadoDeSessao
 from forja.application.portas.sandbox import SandboxAtivo
@@ -21,6 +22,7 @@ from forja.domain.harness import (
     comando_de_teste_valido,
 )
 from forja.domain.seguranca import dado_nao_confiavel
+from forja.domain.skills import catalogo_para_prompt
 from forja.infrastructure.agents.agent_sdk import AgentSdkRunner
 from forja.infrastructure.agents.esquemas import ContratoSaida, InicializacaoSaida, SessaoSaida
 from forja.infrastructure.agents.estruturado import (
@@ -77,7 +79,9 @@ class ExecutorAgente:
         max_turnos: int = 40,
         timeout_s: float = 1800,
         ao_bloquear: Bloqueio | None = None,
+        catalogo: CatalogoDeSkills | None = None,
     ) -> None:
+        self._catalogo = catalogo
         self._runner = runner
         self._contratante = contratante
         self._memoria = memoria
@@ -125,6 +129,17 @@ class ExecutorAgente:
             f"<contexto>{dado_nao_confiavel(contexto)}</contexto>\n"
             f"<memoria_do_repositorio>{await memoria.para_o_prompt()}</memoria_do_repositorio>"
         )
+        carregar: Callable[[str], Awaitable[str]] | None = None
+        if self._catalogo is not None:
+            catalogo = self._catalogo
+            skills = await catalogo.listar(repositorio)
+            texto += f"\n<skills>{dado_nao_confiavel(catalogo_para_prompt(skills))}</skills>"
+
+            async def _carregar(nome: str) -> str:
+                return await catalogo.carregar(repositorio, nome)
+
+            carregar = _carregar
+
         if feedback:
             texto += (
                 f"\n<feedback_do_avaliador>{dado_nao_confiavel(feedback)}</feedback_do_avaliador>"
@@ -133,7 +148,7 @@ class ExecutorAgente:
             opcoes = opcoes_com_ferramentas(
                 self._runner.system_prompt,
                 politica, sandbox, memoria, Path(raiz), self._max_turnos, self._modelo,
-                self._ao_bloquear,
+                self._ao_bloquear, carregar,
             )  # fmt: skip
             pedido = PedidoAgente(texto, limites=LimitesSessao(self._timeout, self._max_turnos))
             with span_sessao_agente(

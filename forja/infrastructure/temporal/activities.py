@@ -10,9 +10,14 @@ from typing import Protocol
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from forja.application.casos_de_uso.revisao import RevisarEntrega
 from forja.application.portas.agente import UsoModelo
 from forja.application.portas.harness import ContextoDaEntrega, Harness
 from forja.application.portas.publicador import DestinoDaEntrega, PublicadorDeEntrega
+from forja.application.portas.revisao import EscritaDeRevisao, LeituraDeRevisao
+from forja.domain.artefatos import caminho_do_artefato
+from forja.domain.politica import Tier
+from forja.domain.revisao import REVISORES, Achado, Severidade
 from forja.infrastructure.github.cliente import nome_da_branch
 from forja.infrastructure.telemetry.metricas import MetricasForja
 
@@ -80,9 +85,67 @@ class HarnessSaida:
     funcionalidades: int = 0
     feedback: str = ""
     violacoes: int = 0
+    sessoes: int = 0
     tokens_entrada: int = 0
     tokens_saida: int = 0
     custo_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class AchadoDto:
+    revisor: str
+    severidade: str
+    mensagem: str
+    arquivo: str = ""
+    linha: int = 0
+    risco: int = 1
+
+
+@dataclass(frozen=True)
+class PoliticaDto:
+    por_intent_usd: float = 0.0  # 0 = sem teto
+    max_sessoes: int = 0
+    declarada: bool = False
+
+
+@dataclass(frozen=True)
+class RevisaoEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    artefatos: dict[str, str] = field(default_factory=dict[str, str])
+    labels: list[str] = field(default_factory=list[str])
+    numero: int = 0
+    sha: str = ""  # SHA pós-review, fixado: checks e merge valem só para ele
+
+
+@dataclass(frozen=True)
+class FixarEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    sha_revisado: str
+
+
+@dataclass(frozen=True)
+class RevisaoSaida:
+    sha: str = ""  # SHA da ponta que foi revisada
+    tier: int = 3
+    motivos: list[str] = field(default_factory=list[str])
+    achados: list[AchadoDto] = field(default_factory=list[AchadoDto])
+    review_md: str = ""
+    resumos: dict[str, str] = field(default_factory=dict[str, str])
+    tokens_entrada: int = 0
+    tokens_saida: int = 0
+    custo_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class DeployEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    sha: str = ""  # SHA fixado depois da revisão
 
 
 @dataclass(frozen=True)
@@ -98,7 +161,9 @@ class ExecutorDeEtapa(Protocol):
     async def __call__(self, entrada: EtapaEntrada) -> EtapaSaida: ...
 
 
-DESFECHOS_CONCLUIDOS = frozenset({"concluida", "artefatos_publicados", "verificada", "aprovada"})
+DESFECHOS_CONCLUIDOS = frozenset(
+    {"concluida", "artefatos_publicados", "verificada", "aprovada", "mesclada"}
+)
 
 
 class DeliveryActivities:
@@ -111,7 +176,13 @@ class DeliveryActivities:
         publicador: PublicadorDeEntrega | None = None,
         metricas: MetricasForja | None = None,
         harness: Harness | None = None,
+        revisor: RevisarEntrega | None = None,
+        leitura: LeituraDeRevisao | None = None,
+        escrita: EscritaDeRevisao | None = None,
     ) -> None:
+        self._revisor = revisor
+        self._leitura = leitura
+        self._escrita = escrita
         self._harness_impl = harness
         self._executor = executor
         self._intervalo = intervalo_heartbeat_s
@@ -162,6 +233,148 @@ class DeliveryActivities:
     async def abrir_pr(self, entrada: PrEntrada) -> str:
         destino = DestinoDaEntrega(entrada.repositorio, entrada.intent_id, entrada.slug)
         return await self._pub().abrir_pr(destino, entrada.titulo, entrada.corpo)
+
+    # --- revisão e deploy (M5) ---------------------------------------------------------
+
+    def _revisao(self) -> RevisarEntrega:
+        if self._revisor is None:
+            raise ApplicationError("revisão não configurada", non_retryable=True)
+        return self._revisor
+
+    def _leit(self) -> LeituraDeRevisao:
+        if self._leitura is None:
+            raise ApplicationError("leitura de revisão não configurada", non_retryable=True)
+        return self._leitura
+
+    def _escr(self) -> EscritaDeRevisao:
+        if self._escrita is None:
+            raise ApplicationError("escrita de revisão não configurada", non_retryable=True)
+        return self._escrita
+
+    @activity.defn(name="carregar_politica")
+    async def carregar_politica(self, repositorio: str) -> PoliticaDto:
+        # Sem leitura não há política para aplicar: ilimitado seria falhar aberto.
+        p = await self._leit().politica(repositorio)
+        o = p.orcamento
+        return PoliticaDto(o.por_intent_usd or 0.0, o.max_sessoes_por_intent or 0, p.declarada)
+
+    @activity.defn(name="revisar")
+    async def revisar(self, e: RevisaoEntrada) -> RevisaoSaida:
+        revisor = self._revisao()
+        politica = await self._leit().politica(e.repositorio)
+        feita = await self._com_heartbeat(
+            revisor.executar(
+                e.repositorio,
+                nome_da_branch(e.intent_id, e.slug),
+                e.artefatos.get("intent.md", ""),
+                e.artefatos.get("spec.md", ""),
+                e.labels,
+                politica,
+                e.intent_id,
+            ),
+            "revisar",
+        )
+        self._medir_uso(feita.uso)
+        r = feita.resultado
+        return RevisaoSaida(
+            sha=feita.diff.head_sha,
+            tier=int(r.tier),
+            motivos=list(r.classificacao.motivos),
+            achados=[
+                AchadoDto(
+                    a.revisor,
+                    a.severidade.value,
+                    a.mensagem,
+                    a.arquivo or "",
+                    a.linha or 0,
+                    int(a.risco),
+                )
+                for a in r.achados
+            ],
+            review_md=feita.review_md,
+            tokens_entrada=feita.uso.tokens_entrada,
+            tokens_saida=feita.uso.tokens_saida,
+            custo_usd=feita.uso.custo_usd,
+        )
+
+    @activity.defn(name="fixar_sha")
+    async def fixar_sha(self, e: FixarEntrada) -> str:
+        """SHA pós-review: a ponta atual da branch, se o único avanço desde o SHA revisado foi o
+        commit do review.md feito pela Forja. Qualquer outra coisa (alguém empurrou código) devolve
+        vazio: a revisão não vale mais para o que está na branch."""
+        branch = nome_da_branch(e.intent_id, e.slug)
+        ponta = await self._leit().head_da_branch(e.repositorio, branch)
+        avanco = await self._leit().avanco(e.repositorio, e.sha_revisado, ponta)
+        review = caminho_do_artefato(e.intent_id, "review.md")
+        return ponta if avanco.so_o_review(review) else ""
+
+    @activity.defn(name="publicar_checks")
+    async def publicar_checks(self, e: RevisaoEntrada, achados: list[AchadoDto]) -> str:
+        """Um check run por revisor, no commit atual da branch (depois do review.md)."""
+        self._revisao()
+        if not e.sha:
+            raise ApplicationError("SHA pós-review ausente", non_retryable=True)
+        concluidos: list[str] = []
+        for nome in REVISORES:
+            dos_dele = tuple(
+                Achado(
+                    a.revisor,
+                    Severidade(a.severidade),
+                    a.mensagem,
+                    a.arquivo or None,
+                    a.linha or None,
+                    Tier(a.risco),
+                )
+                for a in achados
+                if a.revisor == nome
+            )
+            concluidos.append(
+                await self._escr().check_run(
+                    e.repositorio,
+                    e.sha,
+                    nome,
+                    dos_dele,
+                    f"{len(dos_dele)} achado(s)",
+                    e.intent_id,
+                )
+            )
+        return ",".join(concluidos)
+
+    @activity.defn(name="estado_dos_checks")
+    async def estado_dos_checks(self, e: DeployEntrada) -> str:
+        if not e.sha:
+            raise ApplicationError("SHA pós-review ausente", non_retryable=True)
+        return await self._leit().estado_dos_checks(e.repositorio, e.sha)
+
+    async def _branch_andou(self, e: DeployEntrada) -> bool:
+        ponta = await self._leit().head_da_branch(
+            e.repositorio, nome_da_branch(e.intent_id, e.slug)
+        )
+        return ponta != e.sha
+
+    @activity.defn(name="marcar_pronto")
+    async def marcar_pronto(self, e: DeployEntrada) -> str:
+        if not e.sha or await self._branch_andou(e):
+            return "andou"  # a aprovação humana vale só para o SHA revisado
+        numero = await self._leit().numero_do_pr(e.repositorio, nome_da_branch(e.intent_id, e.slug))
+        if numero is None:
+            return "sem_pr"
+        return await self._escr().marcar_pr_pronto(e.repositorio, numero, e.intent_id)
+
+    @activity.defn(name="mesclar")
+    async def mesclar(self, e: DeployEntrada) -> str:
+        """Merge do SHA revisado, e só dele: se a branch andou ou os checks deixaram de ser
+        verdes, não mescla (o GitHub também recusa um merge cujo `sha` não é a ponta)."""
+        if not e.sha or await self._branch_andou(e):
+            return "andou"
+        if await self._leit().estado_dos_checks(e.repositorio, e.sha) != "verde":
+            return "checks_mudaram"
+        branch = nome_da_branch(e.intent_id, e.slug)
+        numero = await self._leit().numero_do_pr(e.repositorio, branch)
+        if numero is None:
+            return "sem_pr"
+        await self._escr().marcar_pr_pronto(e.repositorio, numero, e.intent_id)
+        return await self._escr().mesclar_pr(e.repositorio, numero, e.sha, e.intent_id)
 
     @activity.defn(name="registrar_desfecho")
     async def registrar_desfecho(self, desfecho: str) -> None:
@@ -231,6 +444,7 @@ class DeliveryActivities:
         )
         self._medir_uso(r.uso)
         return HarnessSaida(
+            sessoes=r.sessoes,
             aprovadas=list(r.aprovadas),
             reprovadas=list(r.reprovadas),
             aprovado_pelo_avaliador=r.aprovado_pelo_avaliador,

@@ -19,6 +19,7 @@ from forja.domain.artefatos import ArtefatoInvalido, caminho_relativo_seguro
 RAIZ_NO_SANDBOX = "/workspace"
 FERRAMENTA_EXEC = "mcp__sandbox__exec"
 PREFIXO_MEMORIA = "mcp__memoria__"
+PREFIXO_SKILLS = "mcp__skills__"
 LEITURA = frozenset({"Read", "Glob", "Grep"})
 ESCRITA = frozenset({"Write", "Edit", "MultiEdit"})
 
@@ -179,7 +180,7 @@ def decidir_ferramenta(
         return decidir_escrita(politica, entrada)
     if ferramenta == FERRAMENTA_EXEC:
         return decidir_comando(politica, entrada.get("argv"))
-    if ferramenta.startswith(PREFIXO_MEMORIA):
+    if ferramenta.startswith((PREFIXO_MEMORIA, PREFIXO_SKILLS)):
         return PERMITIDO  # a ferramenta de memória valida o próprio caminho e o escopo
     return negado(f"ferramenta não permitida: {ferramenta[:40]}")
 

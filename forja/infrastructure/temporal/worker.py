@@ -55,6 +55,13 @@ def criar_worker(
             ativ.harness_inicializar,
             ativ.harness_bloco,
             ativ.harness_verificar,
+            ativ.carregar_politica,
+            ativ.revisar,
+            ativ.fixar_sha,
+            ativ.publicar_checks,
+            ativ.estado_dos_checks,
+            ativ.marcar_pronto,
+            ativ.mesclar,
         ],
         interceptors=list(interceptors),
         max_cached_workflows=max_cached_workflows,
@@ -90,8 +97,10 @@ class TemporalEntregaGateway:
         task_queue: str = FILA_PADRAO,
         prazo_lembrete_s: float = 48 * 3600,
         harness: bool = False,
+        automerge: frozenset[str] = frozenset(),
     ) -> None:
         self._harness = harness
+        self._automerge = frozenset(r.lower() for r in automerge)
         self._client = client
         self._fila = task_queue
         self._prazo = prazo_lembrete_s
@@ -111,6 +120,8 @@ class TemporalEntregaGateway:
             titulo=comando.titulo[:300],
             slug=slugificar(comando.titulo),
             harness=self._harness,
+            labels=list(comando.labels),
+            automerge=comando.origem.repositorio.lower() in self._automerge,
             url=comando.origem.url,
             solicitantes=[a.lower() for a in (comando.autor, comando.autor_da_issue) if a],
             corpo=comando.corpo[:LIMITE_CORPO],

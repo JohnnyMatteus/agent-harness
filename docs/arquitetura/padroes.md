@@ -48,3 +48,15 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Estado externalizado | `.forja/<id>/*` + git | Sessões sem memória, retomáveis |
 | Ports and Adapters | `AreaDeTrabalho`, `RemotoGit`, `ArmazemDeMemoria`, `AvaliadorIndependente` | Git real e dublê de sandbox nos testes, sem mudar o caso de uso |
 | Cancelamento seguro | `destruir_mesmo_cancelado` | `/forja stop` e pânico destroem o sandbox |
+
+## Governança (M5)
+
+| Padrão ou princípio | Onde | Por quê |
+| --- | --- | --- |
+| Fail closed na política | `Politica.padrao_fechado`, `GitHubCliente.politica` | Arquivo ausente, inválido ou fora do subconjunto nunca abre |
+| Máximo de um semirreticulado (tier = max) | `Politica.classificar`, `tier_com_achados` | O risco só sobe; propriedade testada com hypothesis |
+| Parse por segmentos, sem regex | `casar_glob` | Padrão do repositório-alvo não causa backtracking exponencial |
+| Fan-out / fan-in | `RevisarEntrega` | Revisores independentes em paralelo; falha de um derruba a revisão |
+| Anti-corruption layer na escrita | `PublicadorGitHub` (check run, PR pronto, merge) | Dry-run, idempotência e neutralização num só ponto |
+| Confirmação do efeito | `marcar_pr_pronto` (GraphQL `errors`), `mesclar_pr` (`merged: true`) | HTTP 200 não é sucesso |
+| Divulgação progressiva | `CatalogoDeSkills`, ferramenta `skill` | Tokens fixos mínimos; corpo sob demanda |

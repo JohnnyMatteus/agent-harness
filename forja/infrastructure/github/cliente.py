@@ -3,15 +3,32 @@ from __future__ import annotations
 import base64
 import re
 import unicodedata
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import quote
 
 import httpx
 
+from forja.application.portas.revisao import EstadoDosChecks
 from forja.domain.artefatos import TETO_DE_ARTEFATO, ArtefatoInvalido, caminho_relativo_seguro
+from forja.domain.politica import Politica, PoliticaInvalida
+from forja.domain.revisao import (
+    TETO_DE_ARQUIVOS,
+    ArquivoDoDiff,
+    AvancoDaBranch,
+    DiffDaEntrega,
+)
 from forja.infrastructure.github.erros import BranchProtegida, GitHubApiError
+from forja.infrastructure.yaml_estrito import YamlInvalido
+from forja.infrastructure.yaml_estrito import ler as ler_yaml
 
 PREFIXO_BRANCH = "forja/"
+CONCLUSOES_VERDES = frozenset({"success", "neutral", "skipped"})
+MAX_PAGINAS_DE_CHECKS = 10
+TETO_DE_PATCH = 8_000
+_PR_PRONTO = (
+    "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
+    "{ clientMutationId } }"
+)
 _PERMISSOES_ESCRITA = {"admin", "maintain", "write"}
 
 
@@ -109,6 +126,190 @@ class GitHubCliente:
             {"title": titulo, "head": branch, "base": padrao, "body": corpo, "draft": rascunho},
         )
         return str(pr["html_url"])
+
+    # --- revisão e deploy -------------------------------------------------------------
+
+    async def head_da_branch(self, repositorio: str, branch: str) -> str:
+        """SHA da ponta da branch, lido da ref (o compare só devolve até 250 commits e o último
+        deles não é necessariamente a ponta)."""
+        ref = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/git/ref/heads/{quote(branch)}"
+        )
+        return str(ref["object"]["sha"])
+
+    async def diff_da_entrega(self, repositorio: str, branch: str) -> DiffDaEntrega:
+        padrao = await self.branch_padrao(repositorio)
+        sha = await self.head_da_branch(repositorio, branch)  # o compare é por SHA, não pelo nome
+        comparacao = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/compare/{quote(padrao)}...{sha}"
+        )
+        brutos = comparacao.get("files", [])
+        arquivos = [
+            ArquivoDoDiff(
+                f["filename"],
+                str(f.get("status", "modified")),
+                int(f.get("additions", 0)),
+                int(f.get("deletions", 0)),
+                str(f.get("patch", ""))[:TETO_DE_PATCH],
+                f.get("previous_filename"),
+            )
+            for f in brutos[:TETO_DE_ARQUIVOS]
+        ]
+        # O compare corta em 300 arquivos: chegar ao teto é "não vi tudo".
+        return DiffDaEntrega(tuple(arquivos), sha, cortado=len(brutos) >= TETO_DE_ARQUIVOS)
+
+    async def avanco(self, repositorio: str, de_sha: str, para_sha: str) -> AvancoDaBranch:
+        """O que mudou entre dois SHAs da branch: quantos commits e que arquivos."""
+        if de_sha == para_sha:
+            return AvancoDaBranch(0, ())
+        c = await self._chamar(
+            "GET", repositorio, f"/repos/{repositorio}/compare/{de_sha}...{para_sha}"
+        )
+        arquivos: list[str] = []
+        for f in c.get("files", []):
+            arquivos.append(f["filename"])
+            if f.get("previous_filename"):
+                arquivos.append(f["previous_filename"])  # renomear de outro lugar também é mexer
+        if len(c.get("files", [])) >= TETO_DE_ARQUIVOS:
+            arquivos.append("(lista truncada)")  # nunca igual a um avanço esperado
+        return AvancoDaBranch(
+            int(c.get("total_commits", len(c.get("commits", [])))), tuple(arquivos)
+        )
+
+    async def branch_padrao(self, repositorio: str) -> str:
+        return str(
+            (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
+        )
+
+    async def politica(self, repositorio: str) -> Politica:
+        padrao = (await self._chamar("GET", repositorio, f"/repos/{repositorio}"))["default_branch"]
+        texto = await self.ler_arquivo(repositorio, padrao, ".forja/policy.yaml")
+        if texto is None:
+            return Politica.padrao_fechado()
+        try:
+            return Politica.de_dict(ler_yaml(texto))
+        except (YamlInvalido, PoliticaInvalida):
+            return Politica.padrao_fechado()  # política ilegível: fecha, não abre
+
+    async def estado_dos_checks(self, repositorio: str, sha: str) -> EstadoDosChecks:
+        """Verde só com tudo concluído numa allowlist de conclusões (success, neutral, skipped),
+        lendo todas as páginas e os commit statuses, e com ao menos um check EXTERNO em sucesso:
+        os check runs da própria Forja não provam nada sobre o CI do repositório."""
+        runs: list[dict[str, Any]] = []
+        total = 0
+        for pagina in range(1, MAX_PAGINAS_DE_CHECKS + 1):
+            dados = await self._chamar(
+                "GET",
+                repositorio,
+                f"/repos/{repositorio}/commits/{sha}/check-runs?per_page=100&page={pagina}",
+            )
+            lidos = dados.get("check_runs", [])
+            total = int(dados.get("total_count", len(runs) + len(lidos)))
+            runs += lidos
+            if not lidos or len(runs) >= total:
+                break
+        if total > len(runs):
+            return "pendente"  # há checks que não foram lidos
+        statuses: list[dict[str, Any]] = []
+        estado_combinado = ""
+        total_st = 0
+        for pagina in range(1, MAX_PAGINAS_DE_CHECKS + 1):
+            combinado = await self._chamar(
+                "GET",
+                repositorio,
+                f"/repos/{repositorio}/commits/{sha}/status?per_page=100&page={pagina}",
+            )
+            lidos_st = combinado.get("statuses", [])
+            if pagina == 1:  # o estado combinado é o mesmo em todas as páginas
+                estado_combinado = str(combinado.get("state", ""))
+            total_st = int(combinado.get("total_count", len(statuses) + len(lidos_st)))
+            statuses += lidos_st
+            if not lidos_st or len(statuses) >= total_st:
+                break
+        if any(
+            r.get("status") == "completed" and r.get("conclusion") not in CONCLUSOES_VERDES
+            for r in runs
+        ):
+            return "falhou"
+        if estado_combinado in ("failure", "error") or any(
+            st.get("state") in ("failure", "error") for st in statuses
+        ):
+            return "falhou"
+        if total_st > len(statuses):
+            return "pendente"  # statuses que não foram lidos: não dá para dizer que está verde
+        # Sem nenhum status (total 0), o `pending` do combinado não trava quem só usa check runs.
+        if (
+            any(r.get("status") != "completed" for r in runs)
+            or any(st.get("state") == "pending" for st in statuses)
+            or (total_st > 0 and estado_combinado == "pending")
+        ):
+            return "pendente"
+        externos = [
+            r for r in runs if not str(r.get("name", "")).startswith("forja/")
+            and r.get("conclusion") == "success"
+        ]  # fmt: skip
+        if not externos and not any(st.get("state") == "success" for st in statuses):
+            return "sem_externos"
+        return "verde"
+
+    async def numero_do_pr(self, repositorio: str, branch: str) -> int | None:
+        """PR aberto da branch da Forja cujo destino é a branch padrão (outro destino não vale)."""
+        dono = repositorio.split("/")[0]
+        padrao = await self.branch_padrao(repositorio)
+        abertos = await self._chamar(
+            "GET",
+            repositorio,
+            f"/repos/{repositorio}/pulls?state=open&head={quote(dono)}:{quote(branch)}"
+            f"&base={quote(padrao)}",
+        )
+        for pr in cast("list[dict[str, Any]]", abertos):
+            base: object = pr.get("base")
+            # Sem `base.ref` legível não dá para afirmar o destino: não vale.
+            if isinstance(base, dict) and cast("dict[str, Any]", base).get("ref") == padrao:
+                return int(pr["number"])
+        return None
+
+    async def criar_check_run(
+        self, repositorio: str, head_sha: str, nome: str, conclusao: str, titulo: str,
+        resumo: str, anotacoes: list[dict[str, Any]],
+    ) -> None:  # fmt: skip
+        await self._chamar(
+            "POST",
+            repositorio,
+            f"/repos/{repositorio}/check-runs",
+            {
+                "name": nome[:80],
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": conclusao,
+                "output": {
+                    "title": titulo[:120],
+                    "summary": resumo[:60_000],
+                    "annotations": anotacoes[:50],
+                },
+            },
+        )
+
+    async def marcar_pr_pronto(self, repositorio: str, numero: int) -> None:
+        pr = await self._chamar("GET", repositorio, f"/repos/{repositorio}/pulls/{numero}")
+        resposta = await self._chamar(
+            "POST",
+            repositorio,
+            "/graphql",
+            {"query": _PR_PRONTO, "variables": {"id": pr["node_id"]}},
+        )
+        if resposta.get("errors"):  # o GraphQL devolve 200 com `errors`: não é sucesso
+            raise GitHubApiError(200, "graphql markPullRequestReadyForReview")
+
+    async def mesclar_pr(self, repositorio: str, numero: int, sha: str) -> None:
+        resposta = await self._chamar(
+            "PUT",
+            repositorio,
+            f"/repos/{repositorio}/pulls/{numero}/merge",
+            {"sha": sha, "merge_method": "squash"},
+        )
+        if resposta.get("merged") is not True:  # só `merged: true` é merge feito
+            raise GitHubApiError(200, "merge não confirmado")
 
     async def _conteudo(self, repositorio: str, url: str, ref: str) -> tuple[str, str] | None:
         try:

@@ -41,7 +41,7 @@ from forja.infrastructure.telemetry.metricas import MetricasForja
 from forja.infrastructure.temporal.activities import DeliveryActivities
 from forja.infrastructure.temporal.worker import TemporalEntregaGateway, criar_worker
 from forja.interfaces.cli.ajustes import Ajustes
-from forja.interfaces.cli.composicao import montar_executor
+from forja.interfaces.cli.composicao import montar_executor, montar_revisao
 from forja.interfaces.http.app import criar_app
 from forja.interfaces.http.panico import DependenciasPanico
 from forja.interfaces.http.webhooks import ConfigWebhook, DependenciasWebhook
@@ -76,6 +76,8 @@ class SdkFalso:
         if papel == "pesquisador":
             foco = prompt.split("<foco>")[1].split("</foco>")[0]
             return {"achados": [{"resumo": f"achado de {foco}", "fontes": [f"f-{foco}", "f-fake"]}]}
+        if papel == "revisor":
+            return {"resumo": "sem objeções", "achados": []}
         if papel == "spec":
             fontes = ["f-codigo"] + (["f-inventada"] if self.fonte_inventada else [])
             return {
@@ -96,6 +98,7 @@ class SdkFalso:
                 ("interprete", "Intérprete"),
                 ("pesquisador", "Você é um pesquisador"),
                 ("spec", "agente de Spec"),
+                ("revisor", "Você é um revisor independente"),
                 ("planner", "Planner"),
             )
             if marca in sistema
@@ -197,6 +200,7 @@ async def ambiente(
     tmp_path: Path,
     monkeypatch,
     montar_harness: Callable[[Path], Any] | None = None,
+    automerge: frozenset[str] = frozenset(),
 ) -> AsyncIterator[Ambiente]:
     from temporalio.contrib.opentelemetry import TracingInterceptor
 
@@ -218,6 +222,9 @@ async def ambiente(
     cliente_gh = GitHubCliente(GitHubAppAuth("1", chave_pem, http_gh), http_gh)
     redis = fakeredis.FakeAsyncRedis()
     metricas = MetricasForja()
+    publicador = PublicadorGitHub(
+        cliente_gh, IdempotenciaRedis(redis), dry_run=False, revisao=cliente_gh
+    )
     sdk = SdkFalso()
     ajustes = Ajustes.do_ambiente()
     ajustes.repos_dir = tmp_path / "repos"
@@ -225,11 +232,16 @@ async def ambiente(
     atividades = DeliveryActivities(
         executor,
         intervalo_heartbeat_s=0.2,
-        publicador=PublicadorGitHub(cliente_gh, IdempotenciaRedis(redis), dry_run=False),
+        publicador=publicador,
         metricas=metricas,
         harness=montar_harness(tmp_path) if montar_harness else None,
+        revisor=montar_revisao(ajustes, cliente_gh, sdk) if montar_harness else None,
+        leitura=cliente_gh,
+        escrita=publicador,
     )
-    gateway = TemporalEntregaGateway(client, harness=montar_harness is not None)
+    gateway = TemporalEntregaGateway(
+        client, harness=montar_harness is not None, automerge=automerge
+    )
     app = criar_app(
         DependenciasWebhook(
             ConfigWebhook(SEGREDO, 1_000_000),

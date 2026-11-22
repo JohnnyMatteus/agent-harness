@@ -6,7 +6,7 @@ str_replace, insert, delete, rename. Resposta em texto, como a ferramenta oficia
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from forja.application.portas.memoria import ArmazemDeMemoria
@@ -121,3 +121,20 @@ class MemoriaDoRepositorio:
                 break
             partes.append(parte)
         return "\n".join(partes)
+
+
+SUFIXO_DO_AVALIADOR = "::avaliador"
+
+
+def memorias_separadas(
+    armazem: ArmazemDeMemoria,
+) -> tuple[Callable[[str], MemoriaDoRepositorio], Callable[[str], MemoriaDoRepositorio]]:
+    """(memória do Executor, memória do Avaliador): namespaces distintos no mesmo armazém.
+
+    O Avaliador é independente (ADR 0011): o que o Executor escreve na memória não entra no
+    prompt dele, e o que ele registra não vira instrução para o Executor. `::` não é válido num
+    nome de repositório, então nenhum dos dois consegue endereçar o namespace do outro."""
+    return (
+        lambda repo: MemoriaDoRepositorio(armazem, repo),
+        lambda repo: MemoriaDoRepositorio(armazem, repo + SUFIXO_DO_AVALIADOR),
+    )

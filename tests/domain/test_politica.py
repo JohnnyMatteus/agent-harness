@@ -113,3 +113,97 @@ def test_orcamento_padrao_quando_nao_declarado_e_vazio_e_valido() -> None:
         and p.orcamento == Orcamento()
         and p.classificar(["docs/a.md"], [], 1).tier is Tier.MEDIO
     )
+
+
+def test_padrao_adversario_do_repositorio_nao_causa_backtracking_exponencial() -> None:
+    import time
+
+    caminho = "/".join(["a"] * 60) + "/b.txt"
+    adversarios = [
+        "/".join(["**"] * 40) + "/x",
+        "**/" * 30 + "*.py",
+        "*a" * 50 + "b",
+        "/".join(["*a*a*a*a*a*b"] * 20),
+        "**/" + "*/" * 30 + "x",
+    ]
+    inicio = time.monotonic()
+    for padrao in adversarios:
+        assert casar_glob(padrao, caminho) is False
+    assert time.monotonic() - inicio < 1.0
+    assert casar_glob("/".join(["**"] * 40) + "/b.txt", caminho) is True  # e os que casam, casam
+
+
+def _glob_antigo(padrao: str, caminho: str) -> bool:
+    """A semântica original (regex), usada só como oráculo em corpus pequeno."""
+    import re
+
+    saida: list[str] = []
+    i = 0
+    while i < len(padrao):
+        if padrao.startswith("**/", i):
+            saida.append("(?:.*/)?")
+            i += 3
+        elif padrao.startswith("**", i):
+            saida.append(".*")
+            i += 2
+        elif padrao[i] == "*":
+            saida.append("[^/]*")
+            i += 1
+        elif padrao[i] == "?":
+            saida.append("[^/]")
+            i += 1
+        else:
+            saida.append(re.escape(padrao[i]))
+            i += 1
+    return re.fullmatch("".join(saida), caminho) is not None
+
+
+def test_glob_linear_preserva_a_semantica_antiga_num_corpus_exaustivo() -> None:
+    import itertools
+
+    pedacos = ["a", "b", "/", "*", "**", "?", "**/", "."]
+    padroes = ["".join(p) for n in range(1, 4) for p in itertools.product(pedacos, repeat=n)]
+    caminhos = ["".join(c) for n in range(0, 6) for c in itertools.product("ab/.", repeat=n)]
+    for padrao in padroes:
+        for caminho in caminhos:
+            assert casar_glob(padrao, caminho) == _glob_antigo(padrao, caminho), (padrao, caminho)
+
+
+@given(
+    st.text(alphabet="ab/.*?", min_size=1, max_size=12),
+    st.text(alphabet="ab/.", min_size=0, max_size=14),
+)
+def test_glob_linear_igual_ao_antigo_em_padroes_aleatorios(padrao: str, caminho: str) -> None:
+    assert casar_glob(padrao, caminho) == _glob_antigo(padrao, caminho)
+
+
+def test_regressao_deploy_dois_asteriscos_ponto_tf_casa_arquivo_em_subdiretorio() -> None:
+    assert casar_glob("deploy/**.tf", "deploy/prod/main.tf") is True
+    p = Politica.de_dict(
+        {"risk_tiers": {"high": {"paths": ["deploy/**.tf"]}, "low": {"paths": ["deploy/**"]}}}
+    )
+    assert p.classificar(["deploy/prod/main.tf"], [], 1).tier is Tier.ALTO
+
+
+def test_caminho_acima_do_teto_e_alto_nao_baixo() -> None:
+    p = Politica.de_dict({"risk_tiers": {"low": {"paths": ["src/**"]}}})
+    longo = "src/" + "a/" * 200 + "auth/login.py"
+    assert len(longo) > 400
+    c = p.classificar([longo], [], 1)
+    assert c.tier is Tier.ALTO and "acima de 400" in " ".join(c.motivos)
+    assert p.classificar(["src/a.py"], [], 1).tier is Tier.BAIXO
+
+
+def test_forja_e_github_sao_sempre_alto_mesmo_com_politica_que_os_libera() -> None:
+    p = Politica.de_dict({"risk_tiers": {"low": {"paths": ["**"]}}})
+    for caminho in (".github/workflows/ci.yml", ".forja/policy.yaml", ".forja/bands.yaml",
+                    ".forja/skills/x/SKILL.md", ".forja/outra-intent/spec.md"):  # fmt: skip
+        assert p.classificar([caminho], [], 1, intent_id="0123456789abcdef").tier is Tier.ALTO, (
+            caminho
+        )
+    # os artefatos da própria intenção não elevam
+    assert (
+        p.classificar([".forja/0123456789abcdef/spec.md"], [], 1, "0123456789abcdef").tier
+        is Tier.BAIXO
+    )
+    assert p.classificar(["src/a.py", ".github/x.yml"], [], 1).tier is Tier.ALTO

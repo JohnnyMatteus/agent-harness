@@ -18,9 +18,12 @@ from forja.application.casos_de_uso.harness import (
     InicializarHarness,
     VerificarEntrega,
 )
-from forja.application.casos_de_uso.memoria_do_repositorio import MemoriaDoRepositorio
+from forja.application.casos_de_uso.memoria_do_repositorio import memorias_separadas
 from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
+from forja.application.casos_de_uso.revisao import RevisarEntrega
+from forja.application.casos_de_uso.skills import CatalogoDeSkills
 from forja.application.portas.sdlc import PesquisaDeConhecimento
+from forja.domain.revisao import REVISORES
 from forja.infrastructure.agents.agent_sdk import AgentSdkRunner, ClienteSdk
 from forja.infrastructure.agents.arquivos_git import ListadorGit
 from forja.infrastructure.agents.avaliador import AvaliadorNaMessagesApi
@@ -31,18 +34,21 @@ from forja.infrastructure.agents.esquemas import (
     InicializacaoSaida,
     IntentSaida,
     PlanoSaida,
+    RevisaoDeModeloSaida,
     SpecSaida,
 )
 from forja.infrastructure.agents.estruturado import AgenteEstruturado
 from forja.infrastructure.agents.executor_sdlc import ExecutorSdlc
 from forja.infrastructure.agents.harness_agentes import ExecutorAgente, InicializadorAgente
 from forja.infrastructure.agents.pesquisa_rag import PesquisaRag, SemPesquisa
+from forja.infrastructure.agents.revisores import RevisorDeModelo, foco_do_revisor
 from forja.infrastructure.agents.sdlc import (
     EspecificadorMultiagente,
     InterpreteAgente,
     PlanejadorAgente,
     carregar_prompt,
 )
+from forja.infrastructure.agents.skills_fontes import SkillsDoRepositorio, SkillsPadrao
 from forja.infrastructure.github.app_auth import GitHubAppAuth
 from forja.infrastructure.github.chave_privada import carregar_chave_privada
 from forja.infrastructure.github.cliente import GitHubCliente
@@ -88,7 +94,9 @@ def montar_gateway(
 ) -> FastAPI:
     cfg = GitHubConfig()  # type: ignore[call-arg]  # segredo vem do ambiente
     github, _, _ = _github(cfg)
-    entregas = TemporalEntregaGateway(client, harness=ajustes.harness)
+    entregas = TemporalEntregaGateway(
+        client, harness=ajustes.harness, automerge=frozenset(ajustes.automerge_repos)
+    )
     ativar = AtivarEntrega(entregas, github, frozenset(ajustes.repos_habilitados))
     app = criar_app(
         DependenciasWebhook(
@@ -163,11 +171,14 @@ def montar_harness(
         raise ConfiguracaoInvalida(
             "FORJA_MODELO_AVALIADOR não definido: a escolha do modelo é do autor"
         )
+    if not ajustes.preco_avaliador_entrada or not ajustes.preco_avaliador_saida:
+        raise ConfiguracaoInvalida(
+            "FORJA_PRECO_AVALIADOR_ENTRADA e FORJA_PRECO_AVALIADOR_SAIDA (USD por milhão de "
+            "tokens) são obrigatórios: sem preço o custo do Avaliador seria 0"
+        )
     armazem = ArmazemPostgres(ajustes.database_url)
     armazem.garantir_esquema()
-
-    def memoria(repositorio: str) -> MemoriaDoRepositorio:
-        return MemoriaDoRepositorio(armazem, repositorio)
+    memoria_executor, memoria_avaliador = memorias_separadas(armazem)
 
     sandbox = DockerSandbox(
         GerenciadorWorktree(ajustes.worktrees_dir.resolve()),
@@ -183,15 +194,17 @@ def montar_harness(
     executor = ExecutorAgente(
         runner("executor"),
         AgenteEstruturado(runner("contratante"), ContratoSaida, "contrato"),
-        memoria,
+        memoria_executor,
         ajustes.modelo,
         ao_bloquear=lambda ferramenta, _: metricas.bloqueios.labels(ferramenta).inc(),
+        catalogo=montar_catalogo_de_skills(github),
     )
     avaliador = AvaliadorNaMessagesApi(
         AsyncAnthropic(),
         ajustes.modelo_avaliador,
-        memoria,
+        memoria_avaliador,
         estrategia_do_modelo(ajustes.modelo_avaliador),
+        preco_por_milhao=(ajustes.preco_avaliador_entrada, ajustes.preco_avaliador_saida),
     )
     inicializador = InicializadorAgente(
         AgenteEstruturado(runner("inicializador"), InicializacaoSaida, "inicializador")
@@ -212,14 +225,52 @@ def montar_harness(
     )
 
 
+def montar_revisao(
+    ajustes: Ajustes, github: GitHubCliente, cliente: ClienteSdk | None = None
+) -> RevisarEntrega:
+    """Quatro revisores independentes e sem ferramenta; o diff chega por código (ADR 0037)."""
+    revisores = [
+        RevisorDeModelo(
+            nome,
+            AgenteEstruturado(
+                AgentSdkRunner(
+                    carregar_prompt("revisor") + foco_do_revisor(nome), cliente, ajustes.modelo
+                )
+                if cliente
+                else AgentSdkRunner(
+                    carregar_prompt("revisor") + foco_do_revisor(nome), modelo=ajustes.modelo
+                ),
+                RevisaoDeModeloSaida,
+                f"revisor-{nome}",
+            ),
+        )
+        for nome in REVISORES
+    ]
+    return RevisarEntrega(revisores, github)
+
+
+def montar_catalogo_de_skills(github: GitHubCliente) -> CatalogoDeSkills:
+    return CatalogoDeSkills(
+        SkillsPadrao(), SkillsDoRepositorio(github.ler_arquivo, github.branch_padrao)
+    )
+
+
 def montar_worker(
     ajustes: Ajustes, client: Client, redis: Redis, metricas: MetricasForja
 ) -> Worker:
     cfg = GitHubConfig()  # type: ignore[call-arg]
     github, auth, _ = _github(cfg)
-    publicador = PublicadorGitHub(github, IdempotenciaRedis(redis), dry_run=not ajustes.publicar)
+    publicador = PublicadorGitHub(
+        github, IdempotenciaRedis(redis), dry_run=not ajustes.publicar, revisao=github
+    )
     harness = montar_harness(ajustes, github, auth, metricas) if ajustes.harness else None
     atividades = DeliveryActivities(
-        montar_executor(ajustes), publicador=publicador, metricas=metricas, harness=harness
+        montar_executor(ajustes),
+        publicador=publicador,
+        metricas=metricas,
+        harness=harness,
+        revisor=montar_revisao(ajustes, github) if harness else None,
+        leitura=github,
+        escrita=publicador,
     )
     return criar_worker(client, atividades)

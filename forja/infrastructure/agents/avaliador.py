@@ -93,10 +93,15 @@ class AvaliadorNaMessagesApi:
         modelo: str,
         memoria: Callable[[str], MemoriaDoRepositorio],
         contexto: EstrategiaDeContexto,
+        *,
+        preco_por_milhao: tuple[float, float],
         max_turnos: int = 16,
         max_tokens: int = 4096,
-        preco_por_milhao: tuple[float, float] | None = None,
     ) -> None:
+        """`preco_por_milhao` (entrada, saída, em USD) é obrigatório: custo desconhecido somaria
+        zero e o orçamento por intenção mentiria."""
+        if min(preco_por_milhao) <= 0:
+            raise ValueError("preço por milhão de tokens deve ser positivo")
         self._cliente = cliente
         self._modelo = modelo
         self._memoria = memoria
@@ -207,11 +212,7 @@ class AvaliadorNaMessagesApi:
 
     def _uso(self, resp: Any) -> UsoModelo:
         entrada, saida = int(resp.usage.input_tokens), int(resp.usage.output_tokens)
-        custo = (
-            0.0
-            if self._preco is None
-            else (entrada * self._preco[0] + saida * self._preco[1]) / 1e6
-        )
+        custo = (entrada * self._preco[0] + saida * self._preco[1]) / 1e6
         return UsoModelo(entrada, saida, custo)
 
     async def _ferramenta(

@@ -23,6 +23,10 @@ class Ajustes(BaseSettings):
     repos_habilitados: Annotated[list[str], NoDecode] = Field(
         default_factory=list, validation_alias="FORJA_REPOS_HABILITADOS"
     )
+    # Repositórios cujo dono habilitou auto-merge para PR de risco baixo (seção 8). Vazio = nenhum.
+    automerge_repos: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, validation_alias="FORJA_AUTOMERGE_REPOS"
+    )
     repos_dir: Path = Field(Path("data/repos"), validation_alias="FORJA_REPOS_DIR")
     worktrees_dir: Path = Field(Path("data/worktrees"), validation_alias="FORJA_WORKTREES_DIR")
     # Efeito externo tem dry-run por padrão: só `FORJA_PUBLICAR=true` escreve no GitHub.
@@ -41,6 +45,14 @@ class Ajustes(BaseSettings):
     harness_aceita_chave_no_sandbox: bool = Field(
         False, validation_alias="FORJA_HARNESS_ACEITA_CHAVE_NO_SANDBOX"
     )
+    # Preço (USD por milhão de tokens) do modelo do Avaliador: sem ele o custo seria 0 e o orçamento
+    # por intenção mentiria, então o harness não liga.
+    preco_avaliador_entrada: float | None = Field(
+        None, validation_alias="FORJA_PRECO_AVALIADOR_ENTRADA"
+    )
+    preco_avaliador_saida: float | None = Field(
+        None, validation_alias="FORJA_PRECO_AVALIADOR_SAIDA"
+    )
     imagem_agente: str = Field(
         "forja-agente:latest", validation_alias="FORJA_SANDBOX_IMAGEM_AGENTE"
     )
@@ -48,7 +60,7 @@ class Ajustes(BaseSettings):
     tamanho_do_bloco: int = Field(3, validation_alias="FORJA_TAMANHO_DO_BLOCO")
     modelo: str | None = Field(None, validation_alias="FORJA_MODELO")
 
-    @field_validator("repos_habilitados", mode="before")
+    @field_validator("repos_habilitados", "automerge_repos", mode="before")
     @classmethod
     def _lista(cls, v: object) -> object:
         if isinstance(v, str):

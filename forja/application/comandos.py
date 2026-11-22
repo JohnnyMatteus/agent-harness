@@ -27,6 +27,7 @@ class CriarIntent:
     autor: str
     # Autor da issue (pode diferir de quem aplicou o label); os dois contam como "quem pediu".
     autor_da_issue: str = ""
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

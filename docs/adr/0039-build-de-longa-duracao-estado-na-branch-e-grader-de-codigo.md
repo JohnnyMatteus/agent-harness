@@ -24,6 +24,9 @@ Rubrica, limiares e exemplos de calibração do Avaliador: os valores no código
 
 ## Limitações
 
+- **Submódulo (gitlink) não é suportado:** o harness recusa a sessão se a árvore da base ou do HEAD tem modo 160000, e recusa `.git` aninhado (ADR 0040).
+- **O modo Docker nunca rodou contra Docker real:** o `DockerSandbox` (inclusive o `.git` somente leitura, o `rm -f` e o `reabrir`), o modo `docker` do lançador e a imagem `forja-agente` só foram exercitados com docker falso; os testes de ponta a ponta usam sandbox local com git real.
+
 - Regressão detectada só na verificação final encerra a entrega (não reabre funcionalidades).
 - Duas implementações concorrentes para issues `hard` (seção 5.3.1) não foram feitas.
 - O Avaliador não usa Playwright: testa por comandos no sandbox (UI exige imagem com navegador).

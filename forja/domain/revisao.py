@@ -30,6 +30,11 @@ class Severidade(StrEnum):
     AVISO = "aviso"
 
 
+TETO_DO_PROMPT = 60_000
+TETO_DE_PATCH = 8_000
+TETO_DE_ARQUIVOS = 300  # o compare do GitHub devolve no máximo 300 arquivos
+
+
 @dataclass(frozen=True, slots=True)
 class ArquivoDoDiff:
     caminho: str
@@ -37,20 +42,59 @@ class ArquivoDoDiff:
     adicoes: int
     remocoes: int
     patch: str = ""
+    # Origem de um rename: sair de infra/ para docs/ também é mexer em infra/.
+    anterior: str | None = None
+
+
+def _rename_puro(a: ArquivoDoDiff) -> bool:
+    """Renomeação sem mudança de conteúdo: não há o que ler; os dois caminhos já contam."""
+    return a.status == "renamed" and a.adicoes + a.remocoes == 0
 
 
 @dataclass(frozen=True, slots=True)
 class DiffDaEntrega:
     arquivos: tuple[ArquivoDoDiff, ...]
     head_sha: str = ""
+    # O compare cortou a lista de arquivos: o que a Forja viu não é tudo.
+    cortado: bool = False
 
     @property
     def caminhos(self) -> tuple[str, ...]:
-        return tuple(a.caminho for a in self.arquivos)
+        """Todos os caminhos tocados, inclusive a origem dos renames."""
+        vistos: dict[str, None] = {}
+        for a in self.arquivos:
+            vistos[a.caminho] = None
+            if a.anterior:
+                vistos[a.anterior] = None
+        return tuple(vistos)
+
+    def limites_de_visibilidade(self) -> tuple[str, ...]:
+        """Por que o revisor pode não ter visto tudo (patch truncado, sem patch, prompt cheio)."""
+        motivos: list[str] = []
+        if any(len(a.patch) >= TETO_DE_PATCH for a in self.arquivos):
+            motivos.append(f"patch de algum arquivo truncado em {TETO_DE_PATCH} caracteres")
+        if any(not a.patch and not _rename_puro(a) for a in self.arquivos):
+            motivos.append("arquivo sem patch (binário ou grande demais): o conteúdo não foi visto")
+        total = sum(len(a.patch) + len(a.caminho) + 80 for a in self.arquivos)
+        if total > TETO_DO_PROMPT:
+            motivos.append(f"diff acima de {TETO_DO_PROMPT} caracteres no prompt do revisor")
+        return tuple(motivos)
 
     @property
     def linhas_alteradas(self) -> int:
         return sum(a.adicoes + a.remocoes for a in self.arquivos)
+
+
+@dataclass(frozen=True, slots=True)
+class AvancoDaBranch:
+    """O que a branch ganhou entre dois SHAs: quantos commits e que arquivos."""
+
+    commits: int
+    caminhos: tuple[str, ...]
+
+    def so_o_review(self, caminho_do_review: str) -> bool:
+        """O único avanço aceito depois da revisão: o commit do review.md feito pela Forja."""
+        return (self.commits, self.caminhos) in ((0, ()), (1, (caminho_do_review,)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +192,20 @@ class ResultadoDaRevisao:
     @property
     def tier(self) -> Tier:
         return self.classificacao.tier
+
+
+def elevar_por_diff_incompleto(base: Classificacao, diff: DiffDaEntrega) -> Classificacao:
+    """Se a Forja não viu tudo, não é risco baixo: lista cortada é alto; patch que o revisor
+    não viu inteiro é no mínimo médio (e nunca auto-merge)."""
+    tier, motivos = base.tier, list(base.motivos)
+    if diff.cortado or len(diff.arquivos) >= TETO_DE_ARQUIVOS:
+        tier = max(tier, Tier.ALTO)
+        motivos.append(f"diff incompleto: a lista chegou ao teto de {TETO_DE_ARQUIVOS} arquivos")
+    limites = diff.limites_de_visibilidade()
+    if limites:
+        tier = max(tier, Tier.MEDIO)
+        motivos += [f"revisão incompleta: {m}" for m in limites]
+    return Classificacao(tier, tuple(motivos))
 
 
 def tier_com_achados(base: Classificacao, achados: Iterable[Achado]) -> Classificacao:
