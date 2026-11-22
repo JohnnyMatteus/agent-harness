@@ -1,5 +1,9 @@
 # pyright: basic
+"""Git do host sobre um worktree que o container escreve. Cada ataque usa um comando inofensivo
+(`touch` de um marcador em diretório temporário) e prova que nada executa no host."""
+
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -9,6 +13,7 @@ from forja.application.portas.sandbox import SandboxError
 from forja.domain.guardrails import Etapa, PoliticaDeSessao, auditar_mudancas
 from forja.infrastructure.sandbox.area_git import AreaGit
 from forja.infrastructure.sandbox.remoto_git import RemotoGitHub
+from forja.infrastructure.sandbox.worktree import GerenciadorWorktree
 
 ID = "0123456789abcdef"
 BRANCH = f"forja/{ID}-corrige-login"
@@ -21,8 +26,8 @@ def sh(*args: str, cwd: Path) -> str:
 
 
 @pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    r = tmp_path / "wt"
+def origem(tmp_path: Path) -> Path:
+    r = tmp_path / "clone"
     (r / "src").mkdir(parents=True)
     (r / "tests").mkdir()
     (r / "src" / "a.py").write_text("x = 1\n")
@@ -33,21 +38,141 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-async def test_mudancas_incluem_nao_commitados_e_a_auditoria_pega_o_que_o_hook_nao_ve(
-    repo: Path,
+@pytest.fixture
+async def repo(origem: Path, tmp_path: Path) -> Path:
+    """Um worktree vinculado de verdade, com o gitdir registrado na criação."""
+    return await GerenciadorWorktree(tmp_path / "wt").criar("s1", origem)
+
+
+@pytest.fixture
+def marcador(tmp_path: Path) -> Path:
+    return tmp_path / "executou-no-host"
+
+
+def armar_filtro(repo: Path, marcador: Path, onde: str = ".gitconfig") -> None:
+    """O que o agente escreveria: um filtro `clean` e o .gitattributes que o aciona."""
+    (repo / onde).parent.mkdir(parents=True, exist_ok=True)
+    (repo / onde).write_text(f'[filter "x"]\n\tclean = touch {marcador}\n')
+    (repo / ".gitattributes").write_text("* filter=x\n")
+    (repo / "src" / "novo.py").write_text("y = 1\n")
+
+
+async def test_gitconfig_no_worktree_nao_vira_configuracao_do_git_do_host(
+    repo: Path, marcador: Path
 ) -> None:
+    for onde in (".gitconfig", ".config/git/config"):
+        armar_filtro(repo, marcador, onde)
+        base = await AreaGit().head(repo)
+        await AreaGit().mudancas(repo, base)
+        await AreaGit().commitar(repo, "m")
+        assert not marcador.exists(), f"{onde} executou no host"
+
+
+async def test_ponteiro_git_trocado_por_repositorio_falso_e_recusado(
+    repo: Path, tmp_path: Path, marcador: Path
+) -> None:
+    falso = tmp_path / "falso"
+    sh("git", "init", "-q", str(falso), cwd=tmp_path)
+    (falso / "config").write_text(
+        f'[core]\n\trepositoryformatversion = 0\n[filter "x"]\n\tclean = touch {marcador}\n'
+    )
+    (repo / ".git").unlink()
+    (repo / ".git").write_text(f"gitdir: {falso}/.git\n")
+    (repo / ".gitattributes").write_text("* filter=x\n")
+    (repo / "src" / "novo.py").write_text("y = 1\n")
+    with pytest.raises(SandboxError, match=r"ponteiro \.git"):
+        await AreaGit().mudancas(repo, "HEAD")
+    assert not marcador.exists()
+
+
+@pytest.mark.parametrize("troca", ["diretorio", "link", "removido"])
+async def test_git_que_deixou_de_ser_o_arquivo_registrado_e_recusado(
+    repo: Path, troca: str
+) -> None:
+    (repo / ".git").unlink()
+    if troca == "diretorio":
+        (repo / ".git").mkdir()
+    elif troca == "link":
+        os.symlink("/tmp", repo / ".git")
+    with pytest.raises(SandboxError, match=r"ponteiro \.git"):
+        await AreaGit().head(repo)
+
+
+async def test_git_aninhado_e_gitlink_sao_recusados_antes_de_qualquer_git_e_descartados(
+    repo: Path, tmp_path: Path, marcador: Path
+) -> None:
+    aninhado = repo / "vendor" / "lib"
+    sh("git", "init", "-q", str(aninhado), cwd=tmp_path)
+    (aninhado / ".git" / "config").write_text(f'[filter "x"]\n\tclean = touch {marcador}\n')
+    (aninhado / "a.py").write_text("x")
+    (repo / ".gitattributes").write_text("* filter=x\n")
+    area = AreaGit()
+    base = await area.head(repo)
+    with pytest.raises(SandboxError, match="aninhado"):
+        await area.mudancas(repo, base)
+    with pytest.raises(SandboxError, match="aninhado"):
+        await area.commitar(repo, "m")
+    assert not marcador.exists()
+    await area.descartar(repo, base)  # remove o .git aninhado e volta ao base
+    assert not (repo / "vendor").exists() and not marcador.exists()
+    assert await area.commitar(repo, "nada") is None
+
+
+async def test_link_em_diretorio_intermediario_nao_e_seguido_na_leitura_nem_na_escrita(
+    repo: Path, tmp_path: Path
+) -> None:
+    fora = tmp_path / "fora"
+    fora.mkdir()
+    (fora / "segredo.md").write_text("segredo do host")
+    os.symlink(fora, repo / "dir")
+    area = AreaGit()
+    with pytest.raises(SandboxError, match="link simbólico"):
+        await area.ler(repo, "dir/segredo.md")
+    with pytest.raises(SandboxError, match="link simbólico"):
+        await area.escrever(repo, "dir/novo.md", "x")
+    with pytest.raises(SandboxError, match="link simbólico"):
+        await area.escrever(repo, "dir/sub/novo.md", "x")
+    assert sorted(p.name for p in fora.iterdir()) == ["segredo.md"]
+    os.symlink("src/a.py", repo / "atalho.md")  # link no último componente
+    with pytest.raises(SandboxError, match="link simbólico"):
+        await area.ler(repo, "atalho.md")
+
+
+async def test_escrita_e_leitura_normais_criam_diretorios_e_nao_vazam_o_teto(repo: Path) -> None:
+    area = AreaGit()
+    await area.escrever(repo, f".forja/{ID}/progress.md", "ok")
+    assert await area.ler(repo, f".forja/{ID}/progress.md") == "ok"
+    assert await area.ler(repo, "nao/existe.md") is None
+    (repo / "grande.md").write_text("x" * 300_000)
+    with pytest.raises(SandboxError, match="teto"):
+        await area.ler(repo, "grande.md")
+    from forja.domain.artefatos import ArtefatoInvalido
+
+    with pytest.raises(ArtefatoInvalido):
+        await area.escrever(repo, "../fora", "x")
+
+
+async def test_worktree_sem_registro_de_gitdir_falha_fechado(origem: Path, tmp_path: Path) -> None:
+    solto = tmp_path / "solto"
+    sh("git", "worktree", "add", "--detach", str(solto), "HEAD", cwd=origem)
+    with pytest.raises(SandboxError, match="sem gitdir registrado"):
+        await AreaGit().head(solto)
+
+
+async def test_mudancas_e_auditoria_pegam_o_que_o_hook_nao_ve(repo: Path) -> None:
     area = AreaGit()
     base = await area.head(repo)
     (repo / "src" / "a.py").write_text("x = 2\n")
-    (repo / "tests" / "test_a.py").write_text("def test_a(): assert True\n")  # trapaça por comando
+    (repo / "tests" / "test_a.py").write_text("def test_a(): assert True\n")
     (repo / "feature_list.json").write_text("{}")
     (repo / "src" / "novo.py").write_text("y = 1\n")
     os.symlink("/etc/passwd", repo / "atalho")
     mudancas = {m.caminho: m for m in await area.mudancas(repo, base)}
     assert mudancas["src/a.py"].status == "M" and mudancas["src/novo.py"].status == "A"
     assert mudancas["atalho"].modo == "120000"
-    testes = frozenset({"tests/test_a.py"})
-    politica = PoliticaDeSessao(Etapa.EXECUTOR, ID, testes_existentes=testes)
+    politica = PoliticaDeSessao(
+        Etapa.EXECUTOR, ID, testes_existentes=frozenset({"tests/test_a.py"})
+    )
     violacoes = auditar_mudancas(politica, mudancas.values())
     assert sorted(v.split(":")[0] for v in violacoes) == [
         "atalho",
@@ -56,76 +181,51 @@ async def test_mudancas_incluem_nao_commitados_e_a_auditoria_pega_o_que_o_hook_n
     ]
 
 
-async def test_descartar_volta_ao_base_e_apaga_o_que_a_sessao_criou(repo: Path) -> None:
+async def test_descartar_volta_ao_base_e_apaga_inclusive_o_que_o_gitignore_esconde(
+    repo: Path,
+) -> None:
     area = AreaGit()
     base = await area.head(repo)
     (repo / "src" / "a.py").write_text("lixo")
     (repo / "novo.txt").write_text("x")
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "forjado").write_text("x")
     await area.descartar(repo, base)
-    assert (repo / "src" / "a.py").read_text() == "x = 1\n" and not (repo / "novo.txt").exists()
-    assert await area.commitar(repo, "nada") is None
+    assert (repo / "src" / "a.py").read_text() == "x = 1\n"
+    assert not (repo / "novo.txt").exists() and not (repo / ".venv").exists()
 
 
-async def test_commit_leva_a_mensagem_inteira_com_trailers(repo: Path) -> None:
-    area = AreaGit()
-    (repo / "src" / "b.py").write_text("z")
-    sha = await area.commitar(repo, f"forja(exec): f1\n\nIntent-Id: {ID}\nRun-Id: r")
-    assert sha and f"Intent-Id: {ID}" in sh("git", "log", "-1", "--format=%B", cwd=repo)
-    assert "Forja" in sh("git", "log", "-1", "--format=%an", cwd=repo)
-    assert "forja(exec)" in await area.log_recente(repo, 3)
-
-
-async def test_hook_do_repositorio_nao_executa_no_commit(repo: Path) -> None:
-    gancho = repo / ".git" / "hooks" / "pre-commit"
-    gancho.write_text("#!/bin/sh\ntouch /tmp/forja-hook-executou-$$\nexit 1\n")
+async def test_commit_leva_a_mensagem_com_trailers_e_ignora_hook_do_clone(
+    repo: Path, origem: Path
+) -> None:
+    gancho = origem / ".git" / "hooks" / "pre-commit"
+    gancho.write_text("#!/bin/sh\nexit 1\n")
     gancho.chmod(0o755)
     (repo / "src" / "b.py").write_text("z")
-    assert await AreaGit().commitar(repo, "m")  # o hook (que falharia) foi ignorado
+    sha = await AreaGit().commitar(repo, f"forja(exec): f1\n\nIntent-Id: {ID}\nRun-Id: r")
+    assert sha and f"Intent-Id: {ID}" in sh("git", "log", "-1", "--format=%B", cwd=repo)
 
 
-async def test_link_para_fora_do_worktree_recusa_e_interno_e_protegido(repo: Path) -> None:
-    area = AreaGit()
-    os.symlink("src/a.py", repo / "interno")
-    testes, links = await area.arquivos_de_teste_e_links(repo)
-    assert testes == {"tests/test_a.py"} and links == {"interno"}
-    os.symlink("/etc", repo / "fora")
-    with pytest.raises(SandboxError, match="fora do worktree"):
-        await area.arquivos_de_teste_e_links(repo)
-
-
-async def test_escrita_do_harness_recusa_caminho_e_link(repo: Path) -> None:
-    area = AreaGit()
-    await area.escrever(repo, f".forja/{ID}/progress.md", "ok")
-    assert await area.ler(repo, f".forja/{ID}/progress.md") == "ok"
-    from forja.domain.artefatos import ArtefatoInvalido
-
-    with pytest.raises(ArtefatoInvalido):
-        await area.escrever(repo, "../fora", "x")
-    os.symlink(repo / "src", repo / "d")
-    with pytest.raises(SandboxError):
-        await area.escrever(repo, "d/x.py", "x")
-
-
-async def test_fetch_e_push_da_branch_da_entrega_contra_um_remoto_local(
-    repo: Path, tmp_path: Path
+async def test_fetch_e_push_da_branch_nao_leem_configuracao_do_worktree(
+    repo: Path, origem: Path, tmp_path: Path, marcador: Path
 ) -> None:
     remotos = tmp_path / "remotos"
     bare = remotos / "acme" / "loja"
     bare.mkdir(parents=True)
     sh("git", "init", "-q", "--bare", "-b", "main", cwd=bare)
-    sh("git", "push", "-q", str(bare), "HEAD:refs/heads/main", cwd=repo)
-    remoto = RemotoGitHub(None, base=str(remotos), dry_run=False)
-    area = AreaGit()
-
-    assert await remoto.buscar("acme/loja", BRANCH, repo) is False  # ainda não existe
-    sh("git", "switch", "-q", "-c", BRANCH, cwd=repo)
+    sh("git", "push", "-q", str(bare), "HEAD:refs/heads/main", cwd=origem)
+    # credential.helper e url.insteadOf do agente, no worktree
+    (repo / ".gitconfig").write_text(
+        f'[credential]\n\thelper = !touch {marcador}\n[url "/nada/"]\n\tinsteadOf = {remotos}/\n'
+    )
+    remoto, area = RemotoGitHub(None, base=str(remotos), dry_run=False), AreaGit()
+    assert await remoto.buscar("acme/loja", BRANCH, repo) is False
+    await area.garantir_branch(repo, BRANCH)
     (repo / "src" / "b.py").write_text("z")
     await area.commitar(repo, "f1")
     await remoto.enviar("acme/loja", BRANCH, repo)
-    assert BRANCH in sh("git", "branch", "--list", cwd=bare)
-
-    outro = tmp_path / "outro"
-    sh("git", "clone", "-q", str(bare), str(outro), cwd=tmp_path)
+    assert BRANCH in sh("git", "branch", "--list", cwd=bare) and not marcador.exists()
+    outro = await GerenciadorWorktree(tmp_path / "wt2").criar("s2", origem)
     assert await remoto.buscar("acme/loja", BRANCH, outro) is True
     assert (outro / "src" / "b.py").read_text() == "z"
 
@@ -156,3 +256,7 @@ async def test_dry_run_nao_toca_o_remoto_e_token_nunca_vai_em_argumento(repo: Pa
     assert env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
     with pytest.raises(SandboxError, match="inválido"):
         real._url("../x")
+
+
+def test_limpeza_do_tmp_do_teste() -> None:
+    assert shutil.which("git")

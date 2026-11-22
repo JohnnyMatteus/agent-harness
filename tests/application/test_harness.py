@@ -238,3 +238,130 @@ async def test_verificacao_final_roda_todos_os_testes_da_branch(amb: Ambiente) -
     await amb.bloco().executar(CTX, 1, ARTEFATOS, "")
     depois = await amb.verificar().executar(CTX)
     assert depois.verde and depois.resultados == {"f1": True, "f2": True}
+
+
+class AreaRegistrada(AreaGit):
+    """Registra cada operação do host sobre um worktree, na mesma linha do tempo do sandbox."""
+
+    def __init__(self, eventos: list[str]) -> None:
+        self._ev = eventos
+
+    def _marca(self, wt: Path) -> None:
+        self._ev.append(f"host:{wt}")
+
+    async def ler(self, worktree, caminho):
+        self._marca(worktree)
+        return await super().ler(worktree, caminho)
+
+    async def escrever(self, worktree, caminho, conteudo):
+        self._marca(worktree)
+        await super().escrever(worktree, caminho, conteudo)
+
+    async def head(self, worktree):
+        self._marca(worktree)
+        return await super().head(worktree)
+
+    async def mudancas(self, worktree, base):
+        self._marca(worktree)
+        return await super().mudancas(worktree, base)
+
+    async def descartar(self, worktree, base):
+        self._marca(worktree)
+        await super().descartar(worktree, base)
+
+    async def commitar(self, worktree, mensagem):
+        self._marca(worktree)
+        return await super().commitar(worktree, mensagem)
+
+    async def log_recente(self, worktree, quantos):
+        self._marca(worktree)
+        return await super().log_recente(worktree, quantos)
+
+    async def arquivos_de_teste_e_links(self, worktree):
+        self._marca(worktree)
+        return await super().arquivos_de_teste_e_links(worktree)
+
+
+def sujos_no_host(eventos: list[str]) -> list[str]:
+    """Operações do host sobre um worktree onde o container rodou código e não foi parado."""
+    sujo: set[str] = set()
+    violacoes: list[str] = []
+    for ev in eventos:
+        tipo, _, wt = ev.partition(":")
+        if tipo == "exec":
+            sujo.add(wt)
+        elif tipo == "quiescer":
+            sujo.discard(wt)
+        elif tipo == "host" and wt in sujo:
+            violacoes.append(ev)
+    return violacoes
+
+
+async def test_nenhum_git_nem_leitura_do_host_ocorre_com_o_container_vivo(tmp_path: Path) -> None:
+    amb = Ambiente(tmp_path)
+    eventos: list[str] = []
+    amb.sandbox = SandboxLocal(tmp_path / "wt", eventos)
+    amb.area = AreaRegistrada(eventos)
+    await inicializado(amb)
+    await amb.bloco(2).executar(CTX, 1, ARTEFATOS, "")
+    assert any(e.startswith("quiescer:") for e in eventos) and amb.sandbox.reabertos
+    assert sujos_no_host(eventos) == []
+    # o detector de verdade: um host que lê antes de parar seria pego
+    assert sujos_no_host(["exec:/w", "host:/w", "quiescer:/w", "host:/w"]) == ["host:/w"]
+
+
+async def test_arquivo_ignorado_ou_deixado_pela_sessao_nao_forja_teste_verde(amb: Ambiente) -> None:
+    await inicializado(amb)
+
+    def forjar(wt: Path, f) -> None:
+        (wt / ".venv").mkdir(exist_ok=True)
+        (wt / ".venv" / "ok").write_text("x")  # ignorado: nunca vai para o commit
+        (wt / "tests" / f"test_{f.id}.py").write_text(
+            "from pathlib import Path\ndef test_ok():\n    assert Path('.venv/ok').exists()\n"
+        )
+
+    amb.executor.sabotagem = forjar
+    r = await amb.bloco(1).executar(CTX, 1, ARTEFATOS, "")
+    assert r.aprovadas == () and "teste sem passar: f1" in r.feedback
+    assert not any(f.passes for f in amb.lista().features)
+    # a verificação rodou num container novo, num checkout limpo do commit
+    assert f"{ID}-ver1" in amb.sandbox.criados and amb.sandbox.destruidos.count(f"{ID}-ver1") >= 1
+
+
+async def test_git_aninhado_criado_pelo_agente_descarta_a_sessao_sem_executar_nada_no_host(
+    amb: Ambiente, tmp_path: Path
+) -> None:
+    await inicializado(amb)
+    marcador = tmp_path / "executou-no-host"
+
+    def aninhar(wt: Path, f) -> None:
+        sub = wt / "vendor" / "x"
+        sub.mkdir(parents=True)
+        sh("git", "init", "-q", str(sub), cwd=wt)
+        (sub / ".git" / "config").write_text(f'[filter "x"]\n\tclean = touch {marcador}\n')
+        (wt / ".gitattributes").write_text("* filter=x\n")
+
+    amb.executor.sabotagem = aninhar
+    r = await amb.bloco(1).executar(CTX, 1, ARTEFATOS, "")
+    assert any("aninhado" in v for v in r.violacoes) and not marcador.exists()
+    assert "implementa f1" not in amb.log() and r.aprovadas == ()
+
+
+async def test_ponteiro_git_trocado_pelo_agente_descarta_a_sessao_e_o_ponteiro_e_restaurado(
+    amb: Ambiente, tmp_path: Path
+) -> None:
+    await inicializado(amb)
+    marcador = tmp_path / "executou-no-host"
+    falso = tmp_path / "falso"
+    sh("git", "init", "-q", str(falso), cwd=tmp_path)
+    (falso / ".git" / "config").write_text(f'[filter "x"]\n\tclean = touch {marcador}\n')
+
+    def trocar(wt: Path, f) -> None:
+        (wt / ".git").unlink()
+        (wt / ".git").write_text(f"gitdir: {falso}/.git\n")
+        (wt / ".gitattributes").write_text("* filter=x\n")
+
+    amb.executor.sabotagem = trocar
+    r = await amb.bloco(1).executar(CTX, 1, ARTEFATOS, "")
+    assert any("ponteiro" in v for v in r.violacoes) and not marcador.exists()
+    assert "implementa f1" not in amb.log()

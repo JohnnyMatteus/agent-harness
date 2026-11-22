@@ -42,8 +42,19 @@ def test_harness_falha_fechado_sem_as_condicoes_de_seguranca() -> None:
     base = {"FORJA_HARNESS": "true"}
     casos = [
         ({}, "FORJA_PUBLICAR"),
-        ({"FORJA_PUBLICAR": "true"}, "DATABASE_URL"),
-        ({"FORJA_PUBLICAR": "true", "DATABASE_URL": "postgresql://x/y"}, "FORJA_MODELO_AVALIADOR"),
+        ({"FORJA_PUBLICAR": "true"}, "ACEITA_CHAVE_NO_SANDBOX"),
+        (
+            {"FORJA_PUBLICAR": "true", "FORJA_HARNESS_ACEITA_CHAVE_NO_SANDBOX": "true"},
+            "DATABASE_URL",
+        ),
+        (
+            {
+                "FORJA_PUBLICAR": "true",
+                "FORJA_HARNESS_ACEITA_CHAVE_NO_SANDBOX": "true",
+                "DATABASE_URL": "postgresql://x/y",
+            },
+            "FORJA_MODELO_AVALIADOR",
+        ),
     ]
     for extra, esperado in casos:
         ajustes = Ajustes.model_validate({**base, **extra})

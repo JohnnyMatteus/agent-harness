@@ -42,10 +42,12 @@ def feature(fid: str) -> Feature:
 
 
 class AtivoLocal:
-    def __init__(self, sessao_id: str, worktree: Path) -> None:
+    def __init__(self, sessao_id: str, worktree: Path, eventos: list[str] | None = None) -> None:
         self.sessao_id, self.worktree = sessao_id, worktree
+        self.eventos = eventos if eventos is not None else []
 
     async def executar(self, comando: list[str], timeout_s: float = 60.0) -> ResultadoComando:
+        self.eventos.append(f"exec:{self.worktree}")
         argv = [sys.executable if comando[0] in ("python", "python3") else comando[0], *comando[1:]]
         if comando[0] == "pytest":
             argv = [sys.executable, "-m", "pytest", *comando[1:]]
@@ -61,17 +63,31 @@ class AtivoLocal:
 
 
 class SandboxLocal:
-    def __init__(self, raiz: Path) -> None:
+    def __init__(self, raiz: Path, eventos: list[str] | None = None) -> None:
         self._wt = GerenciadorWorktree(raiz)
         self.criados: list[str] = []
         self.destruidos: list[str] = []
+        self.quiescidos: list[str] = []
+        self.reabertos: list[str] = []
+        self.eventos = eventos if eventos is not None else []
         self._repos: dict[str, Path] = {}
+        self._worktrees: dict[str, Path] = {}
 
     async def criar(self, spec: EspecSandbox):
         self.criados.append(spec.sessao_id)
         repo = Path(spec.repo_url)
         self._repos[spec.sessao_id] = repo
-        return AtivoLocal(spec.sessao_id, await self._wt.criar(spec.sessao_id, repo))
+        wt = await self._wt.criar(spec.sessao_id, repo, spec.ref)
+        self._worktrees[spec.sessao_id] = wt
+        return AtivoLocal(spec.sessao_id, wt, self.eventos)
+
+    async def quiescer(self, sessao_id: str) -> None:
+        self.quiescidos.append(sessao_id)
+        self.eventos.append(f"quiescer:{self._worktrees[sessao_id]}")
+
+    async def reabrir(self, sessao_id: str):
+        self.reabertos.append(sessao_id)
+        return AtivoLocal(sessao_id, self._worktrees[sessao_id], self.eventos)
 
     async def destruir(self, sessao_id: str) -> None:
         self.destruidos.append(sessao_id)
@@ -120,6 +136,7 @@ class ExecutorFalso:
         self, sandbox, repositorio, intent_id, feature, contexto, feedback, politica
     ) -> ResultadoDeSessao:
         await asyncio.sleep(self.atraso)
+        await sandbox.executar(["ls"])  # a sessão roda código no container
         self.sessoes.append(feature.id)
         self.feedbacks.append(feedback)
         self.contextos.append(contexto)

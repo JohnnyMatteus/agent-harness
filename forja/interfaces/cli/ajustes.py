@@ -36,6 +36,11 @@ class Ajustes(BaseSettings):
     embedder: str | None = Field(None, validation_alias="FORJA_EMBEDDER")
     # Build de longa duração (M4). Exige publicação ligada, banco da memória e imagem com o CLI.
     harness: bool = Field(False, validation_alias="FORJA_HARNESS")
+    # Aceite explícito de um risco conhecido (ADR 0040): a chave da API chega ao processo do CLI,
+    # que roda no mesmo container e uid do código do repositório.
+    harness_aceita_chave_no_sandbox: bool = Field(
+        False, validation_alias="FORJA_HARNESS_ACEITA_CHAVE_NO_SANDBOX"
+    )
     imagem_agente: str = Field(
         "forja-agente:latest", validation_alias="FORJA_SANDBOX_IMAGEM_AGENTE"
     )

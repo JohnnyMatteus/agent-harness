@@ -151,6 +151,12 @@ def montar_harness(
         raise ConfiguracaoInvalida(
             "FORJA_HARNESS exige FORJA_PUBLICAR=true: a continuidade vive na branch remota"
         )
+    if not ajustes.harness_aceita_chave_no_sandbox:
+        raise ConfiguracaoInvalida(
+            "FORJA_HARNESS_ACEITA_CHAVE_NO_SANDBOX=true é obrigatório: a ANTHROPIC_API_KEY chega "
+            "ao CLI do agente, no mesmo container e uid do código do repositório, e um teste "
+            "consegue lê-la (ADR 0040). Use chave com limite de gasto e sem outros acessos."
+        )
     if not ajustes.database_url:
         raise ConfiguracaoInvalida("FORJA_HARNESS exige DATABASE_URL (memória por repositório)")
     if not ajustes.modelo_avaliador:

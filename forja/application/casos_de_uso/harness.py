@@ -100,6 +100,16 @@ class _Base:
             f"Co-Authored-By: {quem} <forja@users.noreply.github.com>"
         )
 
+    async def _preparar(self, ativo: SandboxAtivo, ctx: ContextoDaEntrega) -> bool:
+        """init.sh do commit, num checkout limpo: o ambiente vem do que está versionado."""
+        try:
+            r = await ativo.executar(
+                ["bash", self._caminho(ctx, NomeDeArtefato.INIT)], timeout_s=TIMEOUT_DE_TESTE_S
+            )
+        except SandboxError:
+            return False
+        return r.codigo_saida == 0
+
     async def _testar(self, ativo: SandboxAtivo, feature: Feature) -> bool:
         """Grader de código: o teste da funcionalidade passa (saída 0) ou não passa."""
         try:
@@ -205,21 +215,38 @@ class ExecutarBloco(_Base):
         por_id = {f.id: f for f in lista.features}
         violacoes: list[str] = []
         resumos: list[str] = []
-        for feature_id in contrato.features:  # uma funcionalidade por sessão
+        for indice, feature_id in enumerate(contrato.features):  # uma funcionalidade por sessão
+            if indice > 0:  # o container anterior foi morto antes do git do host
+                ativo = await self._sandbox.reabrir(ativo.sessao_id)
             sessao = await self._sessao(ativo, ctx, por_id[feature_id], feedback)
             uso = _somar(uso, sessao[0])
             violacoes += sessao[1]
             resumos.append(f"{feature_id}: {sessao[2]}")
-        resultados = {fid: await self._testar(ativo, por_id[fid]) for fid in contrato.features}
-        pedido = PedidoDeAvaliacao(
-            contrato,
-            artefatos.get("intent.md", ""),
-            artefatos.get("spec.md", ""),
-            artefatos.get("plan.md", ""),
-            "\n".join(resumos),
-            resultados,
+        # Quem decide `passes` roda num checkout limpo do commit, num container novo: arquivo
+        # ignorado ou deixado pela sessão (node_modules, .venv) não forja teste verde.
+        commit = await self._area.head(wt)
+        verificacao = await self._sandbox.criar(
+            EspecSandbox(f"{ctx.intent_id}-ver{bloco}", self._clone(ctx.repositorio), ref=commit)
         )
-        avaliacao: Avaliacao = await self._avaliador.avaliar(ativo, ctx.repositorio, pedido)
+        try:
+            ambiente_ok = await self._preparar(verificacao, ctx)
+            resultados = {
+                fid: ambiente_ok and await self._testar(verificacao, por_id[fid])
+                for fid in contrato.features
+            }
+            pedido = PedidoDeAvaliacao(
+                contrato,
+                artefatos.get("intent.md", ""),
+                artefatos.get("spec.md", ""),
+                artefatos.get("plan.md", ""),
+                "\n".join(resumos),
+                resultados,
+            )
+            avaliacao: Avaliacao = await self._avaliador.avaliar(
+                verificacao, ctx.repositorio, pedido
+            )
+        finally:
+            await destruir_mesmo_cancelado(self._sandbox, verificacao.sessao_id)
         uso = _somar(uso, avaliacao.uso)
         veredito = decidir_bloco(contrato.limiares, avaliacao.notas)
         passam = features_que_passam(veredito, resultados, contrato)
@@ -271,18 +298,36 @@ class ExecutarBloco(_Base):
         self, ativo: SandboxAtivo, ctx: ContextoDaEntrega, feature: Feature, feedback: str
     ) -> tuple[UsoModelo, list[str], str]:
         wt = ativo.worktree
+        # 1) Leituras do host, antes de qualquer código do repositório rodar no container.
         base = await self._area.head(wt)
         testes, links = await self._area.arquivos_de_teste_e_links(wt)
         politica = PoliticaDeSessao(Etapa.EXECUTOR, ctx.intent_id, testes, links)
-        contexto = await self._contexto(ativo, ctx)
-        resultado = await self._executor.executar_sessao(
-            ativo, ctx.repositorio, ctx.intent_id, feature, contexto, feedback, politica
-        )
-        mudancas = await self._area.mudancas(wt, base)
-        violacoes = list(auditar_mudancas(politica, mudancas))
-        progress = self._caminho(ctx, NomeDeArtefato.PROGRESS)
-        if not violacoes and progress not in {m.caminho for m in mudancas}:
-            violacoes.append(f"{progress}: não foi atualizado na sessão")
+        progress = await self._area.ler(wt, self._caminho(ctx, NomeDeArtefato.PROGRESS)) or ""
+        log = await self._area.log_recente(wt, 10)
+        lista = await self._lista(ctx, wt)
+        tem_init = await self._area.ler(wt, self._caminho(ctx, NomeDeArtefato.INIT)) is not None
+        # 2) Container: estado do ambiente (passo 4) e a sessão do agente.
+        estado = await self._estado(ativo, ctx, lista, tem_init)
+        contexto = f"branch: {ctx.branch}\nestado: {estado}\nprogress.md:\n{progress}\nlog:\n{log}"
+        try:
+            resultado = await self._executor.executar_sessao(
+                ativo, ctx.repositorio, ctx.intent_id, feature, contexto, feedback, politica
+            )
+        finally:
+            # 3) Todos os processos do container morrem ANTES de qualquer leitura ou git do
+            # host no worktree: um processo vivo poderia trocar o que o host está lendo.
+            await self._sandbox.quiescer(ativo.sessao_id)
+        # 4) Git do host, sobre o worktree parado.
+        try:
+            mudancas = await self._area.mudancas(wt, base)
+            violacoes = list(auditar_mudancas(politica, mudancas))
+            caminhos = {m.caminho for m in mudancas}
+        except SandboxError as erro:  # git aninhado, ponteiro .git trocado
+            caminhos = set[str]()
+            violacoes = [f"worktree: {erro}"]
+        progress_md = self._caminho(ctx, NomeDeArtefato.PROGRESS)
+        if not violacoes and progress_md not in caminhos:
+            violacoes.append(f"{progress_md}: não foi atualizado na sessão")
         if violacoes:
             await self._area.descartar(wt, base)  # trapaça ou sessão suja: nada fica
             for v in violacoes:
@@ -294,26 +339,21 @@ class ExecutarBloco(_Base):
         )
         return resultado.uso, [], resultado.resumo[:300]
 
-    async def _contexto(self, ativo: SandboxAtivo, ctx: ContextoDaEntrega) -> str:
-        """Passos 1, 2 e 4 da seção 5.3, por código: branch, progress/log e estado do ambiente."""
-        wt = ativo.worktree
-        progress = await self._area.ler(wt, self._caminho(ctx, NomeDeArtefato.PROGRESS)) or ""
-        log = await self._area.log_recente(wt, 10)
-        lista = await self._lista(ctx, wt)
-        estado = "ambiente ok"
-        init = self._caminho(ctx, NomeDeArtefato.INIT)
-        r = None
-        if await self._area.ler(wt, init) is not None:
-            r = await ativo.executar(["bash", init], timeout_s=TIMEOUT_DE_TESTE_S)
-        if r is not None and r.codigo_saida != 0:
-            estado = f"init.sh falhou ({r.codigo_saida}): {r.stderr[-400:]}"
-        elif lista.comando_de_fumaca:
-            fumaca = await ativo.executar(
-                list(lista.comando_de_fumaca), timeout_s=TIMEOUT_DE_TESTE_S
+    async def _estado(
+        self, ativo: SandboxAtivo, ctx: ContextoDaEntrega, lista: FeatureList, tem_init: bool
+    ) -> str:
+        """Passo 4 da seção 5.3: init.sh e teste de fumaça antes de a sessão começar."""
+        if tem_init:
+            r = await ativo.executar(
+                ["bash", self._caminho(ctx, NomeDeArtefato.INIT)], timeout_s=TIMEOUT_DE_TESTE_S
             )
-            if fumaca.codigo_saida != 0:
-                estado = f"teste de fumaça quebrado antes da sessão: {fumaca.stdout[-400:]}"
-        return f"branch: {ctx.branch}\nestado: {estado}\nprogress.md:\n{progress}\nlog:\n{log}"
+            if r.codigo_saida != 0:
+                return f"init.sh falhou ({r.codigo_saida}): {r.stderr[-400:]}"
+        if lista.comando_de_fumaca:
+            f = await ativo.executar(list(lista.comando_de_fumaca), timeout_s=TIMEOUT_DE_TESTE_S)
+            if f.codigo_saida != 0:
+                return f"teste de fumaça quebrado antes da sessão: {f.stdout[-400:]}"
+        return "ambiente ok"
 
 
 class VerificarEntrega(_Base):
@@ -322,8 +362,11 @@ class VerificarEntrega(_Base):
     async def executar(self, ctx: ContextoDaEntrega) -> ResultadoDaVerificacao:
         ativo = await self._abrir(ctx, "verificar")
         try:
-            lista = await self._lista(ctx, ativo.worktree)
-            resultados = {f.id: await self._testar(ativo, f) for f in lista.features}
+            lista = await self._lista(ctx, ativo.worktree)  # leitura antes de rodar código
+            ambiente_ok = await self._preparar(ativo, ctx)
+            resultados = {
+                f.id: ambiente_ok and await self._testar(ativo, f) for f in lista.features
+            }
             return ResultadoDaVerificacao(lista.completa and all(resultados.values()), resultados)
         finally:
             await destruir_mesmo_cancelado(self._sandbox, ativo.sessao_id)

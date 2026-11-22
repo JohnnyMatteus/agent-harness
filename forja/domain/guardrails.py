@@ -200,8 +200,8 @@ def auditar_mudancas(
     """Violações encontradas no diff da sessão. Vazio = limpo. Qualquer uma descarta a sessão."""
     violacoes: list[str] = []
     for m in mudancas:
-        if m.modo == "120000":
-            violacoes.append(f"{m.caminho}: link simbólico")
+        if m.modo in ("120000", "160000"):
+            violacoes.append(f"{m.caminho}: link simbólico ou gitlink")
             continue
         if m.status == "A":
             d = decidir_caminho_de_escrita(politica, m.caminho)

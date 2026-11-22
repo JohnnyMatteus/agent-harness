@@ -42,5 +42,14 @@ class SandboxAtivo(Protocol):
 class Sandbox(Protocol):
     async def criar(self, spec: EspecSandbox) -> SandboxAtivo: ...
 
+    async def quiescer(self, sessao_id: str) -> None:
+        """Mata o container e TODOS os processos dele, deixando o worktree intacto. O workflow
+        chama antes de ler ou rodar git no worktree (um processo vivo poderia trocá-lo no meio)."""
+        ...
+
+    async def reabrir(self, sessao_id: str) -> SandboxAtivo:
+        """Novo container sobre o mesmo worktree, depois de `quiescer`."""
+        ...
+
     async def destruir(self, sessao_id: str) -> None:
         """Idempotente: destrói container e worktree; chamado também por /forja stop."""
