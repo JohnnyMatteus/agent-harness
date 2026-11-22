@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from forja.application.portas.agente import UsoModelo
+from forja.application.portas.harness import ContextoDaEntrega, Harness
 from forja.application.portas.publicador import DestinoDaEntrega, PublicadorDeEntrega
+from forja.infrastructure.github.cliente import nome_da_branch
 from forja.infrastructure.telemetry.metricas import MetricasForja
 
 
@@ -57,6 +61,31 @@ class ArtefatoEntrada:
 
 
 @dataclass(frozen=True)
+class HarnessEntrada:
+    repositorio: str
+    intent_id: str
+    slug: str
+    bloco: int = 0
+    artefatos: dict[str, str] = field(default_factory=dict[str, str])
+    feedback: str = ""
+
+
+@dataclass(frozen=True)
+class HarnessSaida:
+    aprovadas: list[str] = field(default_factory=list[str])
+    reprovadas: list[str] = field(default_factory=list[str])
+    aprovado_pelo_avaliador: bool = False
+    completa: bool = False
+    verde: bool = False
+    funcionalidades: int = 0
+    feedback: str = ""
+    violacoes: int = 0
+    tokens_entrada: int = 0
+    tokens_saida: int = 0
+    custo_usd: float = 0.0
+
+
+@dataclass(frozen=True)
 class PrEntrada:
     repositorio: str
     intent_id: str
@@ -69,7 +98,7 @@ class ExecutorDeEtapa(Protocol):
     async def __call__(self, entrada: EtapaEntrada) -> EtapaSaida: ...
 
 
-DESFECHOS_CONCLUIDOS = frozenset({"concluida", "artefatos_publicados", "pr_aberto", "aprovada"})
+DESFECHOS_CONCLUIDOS = frozenset({"concluida", "artefatos_publicados", "verificada", "aprovada"})
 
 
 class DeliveryActivities:
@@ -81,17 +110,22 @@ class DeliveryActivities:
         intervalo_heartbeat_s: float = 5.0,
         publicador: PublicadorDeEntrega | None = None,
         metricas: MetricasForja | None = None,
+        harness: Harness | None = None,
     ) -> None:
+        self._harness_impl = harness
         self._executor = executor
         self._intervalo = intervalo_heartbeat_s
         self._publicador = publicador
         self._metricas = metricas
 
     def _medir(self, saida: EtapaSaida) -> None:
+        self._medir_uso(UsoModelo(saida.tokens_entrada, saida.tokens_saida, saida.custo_usd))
+
+    def _medir_uso(self, uso: UsoModelo) -> None:
         if self._metricas is not None:
-            self._metricas.custo_usd.inc(saida.custo_usd)
-            self._metricas.tokens.labels("entrada").inc(saida.tokens_entrada)
-            self._metricas.tokens.labels("saida").inc(saida.tokens_saida)
+            self._metricas.custo_usd.inc(uso.custo_usd)
+            self._metricas.tokens.labels("entrada").inc(uso.tokens_entrada)
+            self._metricas.tokens.labels("saida").inc(uso.tokens_saida)
 
     def _pub(self) -> PublicadorDeEntrega:
         if self._publicador is None:
@@ -138,23 +172,84 @@ class DeliveryActivities:
         elif desfecho == "erro":
             self._metricas.com_erro.inc()
 
-    @activity.defn(name="executar_etapa")
-    async def executar_etapa(self, entrada: EtapaEntrada) -> EtapaSaida:
-        # O cancelamento só chega à activity pelo heartbeat; por isso o batimento roda
-        # enquanto o executor trabalha, e o executor é cancelado junto.
-        trabalho = asyncio.ensure_future(self._executor(entrada))
+    async def _com_heartbeat[T](self, coro: Awaitable[T], detalhe: str) -> T:
+        """O cancelamento só chega à activity pelo heartbeat; por isso o batimento roda enquanto
+        o trabalho acontece, e o trabalho é cancelado junto."""
+        trabalho = asyncio.ensure_future(coro)
         try:
             while True:
-                activity.heartbeat(entrada.etapa)
+                activity.heartbeat(detalhe)
                 feito, _ = await asyncio.wait({trabalho}, timeout=self._intervalo)
                 if feito:
-                    saida = trabalho.result()
-                    self._medir(saida)
-                    return saida
+                    return trabalho.result()
         finally:
             if not trabalho.done():
                 trabalho.cancel()
                 await asyncio.gather(trabalho, return_exceptions=True)
+
+    @activity.defn(name="executar_etapa")
+    async def executar_etapa(self, entrada: EtapaEntrada) -> EtapaSaida:
+        saida = await self._com_heartbeat(self._executor(entrada), entrada.etapa)
+        self._medir(saida)
+        return saida
+
+    def _harness(self) -> Harness:
+        if self._harness_impl is None:
+            raise ApplicationError("harness não configurado", non_retryable=True)
+        return self._harness_impl
+
+    def _ctx(self, e: HarnessEntrada) -> ContextoDaEntrega:
+        return ContextoDaEntrega(
+            e.repositorio,
+            e.intent_id,
+            nome_da_branch(e.intent_id, e.slug),
+            activity.info().workflow_run_id or "",
+        )
+
+    @activity.defn(name="harness_inicializar")
+    async def harness_inicializar(self, e: HarnessEntrada) -> HarnessSaida:
+        lista, uso = await self._com_heartbeat(
+            self._harness().inicializar(
+                self._ctx(e), e.artefatos["spec.md"], e.artefatos["plan.md"]
+            ),
+            "inicializar",
+        )
+        self._medir_uso(uso)
+        return HarnessSaida(
+            completa=lista.completa,
+            funcionalidades=len(lista.features),
+            tokens_entrada=uso.tokens_entrada,
+            tokens_saida=uso.tokens_saida,
+            custo_usd=uso.custo_usd,
+        )
+
+    @activity.defn(name="harness_bloco")
+    async def harness_bloco(self, e: HarnessEntrada) -> HarnessSaida:
+        r = await self._com_heartbeat(
+            self._harness().executar_bloco(self._ctx(e), e.bloco, e.artefatos, e.feedback),
+            f"bloco {e.bloco}",
+        )
+        self._medir_uso(r.uso)
+        return HarnessSaida(
+            aprovadas=list(r.aprovadas),
+            reprovadas=list(r.reprovadas),
+            aprovado_pelo_avaliador=r.aprovado_pelo_avaliador,
+            completa=r.completa,
+            feedback=r.feedback[:4000],
+            violacoes=len(r.violacoes),
+            tokens_entrada=r.uso.tokens_entrada,
+            tokens_saida=r.uso.tokens_saida,
+            custo_usd=r.uso.custo_usd,
+        )
+
+    @activity.defn(name="harness_verificar")
+    async def harness_verificar(self, e: HarnessEntrada) -> HarnessSaida:
+        v = await self._com_heartbeat(self._harness().verificar(self._ctx(e)), "verificar")
+        return HarnessSaida(
+            verde=v.verde,
+            reprovadas=[f for f, ok in v.resultados.items() if not ok],
+            aprovadas=[f for f, ok in v.resultados.items() if ok],
+        )
 
 
 # Referência para o workflow (nome estável da activity, sem importar a instância).

@@ -34,3 +34,17 @@ Registro dos padrões de projeto e dos princípios SOLID usados, por contexto. C
 | Dry-run por padrão | `PublicadorGitHub` | Nada é escrito sem `FORJA_PUBLICAR=true` |
 | Máquina de portões por sinal | `DeliveryWorkflow` | Decisão humana durável; sinal fora do portão é descartado |
 | Defesa em profundidade na saída | `neutralizar_texto` no publicador | Mesmo que o modelo obedeça a injeção, o texto publicado não abre canal |
+
+## Build de longa duração (M4)
+
+| Padrão ou princípio | Onde | Por quê |
+| --- | --- | --- |
+| Política como código, em duas camadas | `domain/guardrails.py` (PreToolUse) e `auditar_mudancas` (diff) | O hook não vê o que um comando permitido escreve; o diff vê |
+| Default deny | `decidir_ferramenta` | Ferramenta nova nasce bloqueada |
+| Invariante de agregado | `FeatureList`, `exigir_so_passes_mudou`, `com_passes` | Só um caminho marca `passes`, e nunca de volta |
+| Capability confinada | `MemoriaDoRepositorio` (repositório fixado na construção) | O agente não escolhe o escopo |
+| Facade | `HarnessDaEntrega` | As activities enxergam três chamadas, não os casos de uso |
+| Template method simples | `_Base._abrir` (sandbox, fetch, branch, destruição garantida) | O ciclo de vida do sandbox é igual nos três passos |
+| Estado externalizado | `.forja/<id>/*` + git | Sessões sem memória, retomáveis |
+| Ports and Adapters | `AreaDeTrabalho`, `RemotoGit`, `ArmazemDeMemoria`, `AvaliadorIndependente` | Git real e dublê de sandbox nos testes, sem mudar o caso de uso |
+| Cancelamento seguro | `destruir_mesmo_cancelado` | `/forja stop` e pânico destroem o sandbox |

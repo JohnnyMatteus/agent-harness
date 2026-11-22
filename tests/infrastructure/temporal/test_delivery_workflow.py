@@ -308,3 +308,82 @@ async def test_custo_e_tokens_das_sessoes_chegam_ao_resultado_e_a_metrica(env):
     texto = m.exportar().decode()
     assert "forja_custo_usd_total 1.5" in texto
     assert 'forja_tokens_total{direcao="entrada"} 30.0' in texto
+
+
+async def _rodar_harness(env, harness, iid="b1", **extra):
+    pub = PublicadorFalso()
+    ativ = DeliveryActivities(ExecutorFalso(), publicador=pub, harness=harness)
+    entrada = DeliveryEntrada(intent_id=ID, harness=True, **{**REPO, **extra})
+    async with criar_worker(env.client, ativ):
+        h, _ = await iniciar_ou_sinalizar(env.client, entrada)
+        await _confirmar(h)
+        return await h.result(), pub
+
+
+async def test_harness_percorre_blocos_verifica_e_so_entao_abre_o_pr(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso
+
+    harness = HarnessFalso(blocos=[(("f1",), False), (("f2",), True)])
+    saida, pub = await _rodar_harness(env, harness)
+    assert saida.desfecho == Desfecho.VERIFICADA and saida.etapa_final == "review"
+    assert harness.chamadas == ["inicializar", "bloco1", "bloco2", "verificar"]
+    assert saida.custo_usd == pytest.approx(1.5 + 0.1 + 0.4)  # etapas + inicializador + blocos
+    assert len(pub.prs) == 1 and "passaram na verificação" in pub.prs[0][1]
+    chaves = [c[0] for c in pub.comentarios]
+    assert f"{ID}:bloco-1" in chaves and f"{ID}:bloco-2" in chaves and f"{ID}:verificada" in chaves
+
+
+async def test_harness_sem_progresso_devolve_o_feedback_e_depois_falha_para_um_humano(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso
+
+    harness = HarnessFalso(blocos=[((), False)] * 5)
+    saida, pub = await _rodar_harness(env, harness, rodadas_sem_progresso=2)
+    assert (
+        saida.desfecho == Desfecho.FALHOU
+        and "sem funcionalidade aprovada" in saida.motivo_da_rejeicao
+    )
+    assert harness.feedbacks == [
+        "",
+        "teste sem passar: f1",
+    ]  # o feedback do bloco volta ao seguinte
+    assert pub.prs == []
+
+
+async def test_verificacao_final_vermelha_conta_ciclo_e_falha(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso
+
+    harness = HarnessFalso(verde=False)
+    saida, pub = await _rodar_harness(env, harness)
+    assert saida.desfecho == Desfecho.FALHOU and saida.etapa_final == "build"  # Test -> Build
+    assert "f1" in saida.motivo_da_rejeicao and pub.prs == []
+
+
+async def test_harness_desligado_mantem_o_comportamento_do_m3(env):
+    pub = PublicadorFalso()
+    async with criar_worker(env.client, DeliveryActivities(ExecutorFalso(), publicador=pub)):
+        h, _ = await iniciar_ou_sinalizar(env.client, DeliveryEntrada(intent_id=ID, **REPO))
+        await _confirmar(h)
+        saida = await h.result()
+    assert saida.desfecho == Desfecho.ARTEFATOS_PUBLICADOS and "ainda não foi" in pub.prs[0][1]
+
+
+async def test_parar_cancela_o_bloco_em_curso(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso
+
+    harness = HarnessFalso(atraso=3600)
+    pub = PublicadorFalso()
+    ativ = DeliveryActivities(
+        ExecutorFalso(), publicador=pub, harness=harness, intervalo_heartbeat_s=0.2
+    )
+    async with criar_worker(env.client, ativ):
+        h, _ = await iniciar_ou_sinalizar(
+            env.client, DeliveryEntrada(intent_id=ID, harness=True, heartbeat_s=2, **REPO)
+        )
+        await _confirmar(h)
+        async with asyncio.timeout(30):
+            while "bloco1" not in harness.chamadas:
+                await asyncio.sleep(0.05)
+        await h.signal(DeliveryWorkflow.parar)
+        await asyncio.sleep(1)
+        saida = await h.result()
+    assert saida.desfecho == Desfecho.CANCELADA and pub.prs == []

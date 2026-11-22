@@ -28,6 +28,12 @@ class MetricasForja:
             "forja_custo_usd_total", "Custo estimado de sessões", registry=self.registry
         )
 
+        self.bloqueios = Counter(
+            "forja_bloqueios_hook_total",
+            "Ações de agente bloqueadas por guardrail",
+            ["origem"],
+            registry=self.registry,
+        )
         self.tokens = Counter(
             "forja_tokens_total", "Tokens das sessões", ["direcao"], registry=self.registry
         )

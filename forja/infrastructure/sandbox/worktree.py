@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
@@ -15,14 +18,51 @@ class GitRunner(Protocol):
     async def __call__(self, *args: str, cwd: Path | None = None) -> str: ...
 
 
+_HOME_VAZIO = Path(tempfile.mkdtemp(prefix="forja-wt-home-"))
+
+
+def ambiente_minimo() -> dict[str, str]:
+    """O git do worker não herda segredo nem configuração global (o clone é do operador, mas o
+    processo carrega o ambiente do worker inteiro)."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(_HOME_VAZIO),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 async def git_real(*args: str, cwd: Path | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
+        "git", *args, cwd=cwd, env=ambiente_minimo(),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )  # fmt: skip
     out, err = await proc.communicate()
     if proc.returncode != 0:
         raise SandboxError(f"git {args[0]} falhou: {err.decode().strip()}")
     return out.decode()
+
+
+def caminho_do_registro(worktree: Path) -> Path:
+    """Registro fora do worktree (o container só enxerga o worktree): `<raiz>/.meta/<nome>.json`."""
+    return worktree.parent / ".meta" / f"{worktree.name}.json"
+
+
+def registrar_gitdir(worktree: Path, gitdir: Path, ponteiro: str) -> None:
+    registro = caminho_do_registro(worktree)
+    registro.parent.mkdir(parents=True, exist_ok=True)
+    registro.write_text(json.dumps({"gitdir": str(gitdir), "ponteiro": ponteiro}))
+
+
+def gitdir_registrado(worktree: Path) -> tuple[Path, str]:
+    """(gitdir confiável, conteúdo esperado do ponteiro `.git`), resolvidos na criação.
+    Sem registro, falha fechada."""
+    try:
+        dados = json.loads(caminho_do_registro(worktree).read_text())
+        return Path(str(dados["gitdir"])), str(dados["ponteiro"])
+    except (OSError, ValueError, KeyError):
+        raise SandboxError("worktree sem gitdir registrado na criação") from None
 
 
 class GerenciadorWorktree:
@@ -39,11 +79,25 @@ class GerenciadorWorktree:
         destino = self.caminho(sessao_id)
         self._raiz.mkdir(parents=True, exist_ok=True)
         await self._git("worktree", "add", "--detach", str(destino), ref, cwd=repo)
+        self._registrar(destino, repo)
         return destino
+
+    @staticmethod
+    def _registrar(destino: Path, repo: Path) -> None:
+        """Resolve o gitdir agora, antes de qualquer processo do container existir."""
+        ponteiro = (destino / ".git").read_text().strip()
+        if not ponteiro.startswith("gitdir: "):
+            raise SandboxError("ponteiro .git inesperado no worktree recém-criado")
+        gitdir = Path(ponteiro.removeprefix("gitdir: ")).resolve()
+        administrativo = (repo / ".git" / "worktrees").resolve()
+        if not gitdir.is_relative_to(administrativo):
+            raise SandboxError("gitdir do worktree fora da área administrativa do clone")
+        registrar_gitdir(destino, gitdir, ponteiro)
 
     async def remover(self, sessao_id: str, repo: Path) -> None:
         destino = self.caminho(sessao_id)
         with contextlib.suppress(SandboxError):  # já removido: destruir é idempotente
             await self._git("worktree", "remove", "--force", str(destino), cwd=repo)
         shutil.rmtree(destino, ignore_errors=True)
+        caminho_do_registro(destino).unlink(missing_ok=True)
         await self._git("worktree", "prune", cwd=repo)

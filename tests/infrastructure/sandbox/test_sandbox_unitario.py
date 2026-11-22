@@ -37,6 +37,10 @@ class GitFalso:
 
     async def __call__(self, *args: str, cwd: Path | None = None) -> str:
         self.chamadas.append(args)
+        if args[:3] == ("worktree", "add", "--detach"):  # o que o git de verdade deixa
+            destino = Path(args[3])
+            destino.mkdir(parents=True, exist_ok=True)
+            (destino / ".git").write_text(f"gitdir: {cwd}/.git/worktrees/{destino.name}\n")
         return ""
 
 
@@ -71,7 +75,10 @@ def test_container_sem_root_e_so_com_worktree_montado(tmp_path):
     assert "--read-only" in args and "no-new-privileges" in args
     assert args[args.index("--cap-drop") + 1] == "ALL"
     montagens = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
-    assert montagens == [f"{tmp_path / 'wt'}:/workspace:rw"]
+    assert montagens == [
+        f"{tmp_path / 'wt'}:/workspace:rw",
+        f"{tmp_path / 'wt'}/.git:/workspace/.git:ro",  # só o worktree, e o ponteiro .git em leitura
+    ]
 
 
 def test_segredos_do_host_nao_vazam_so_o_injetado(tmp_path, monkeypatch):
@@ -149,3 +156,42 @@ def test_entrega_do_worktree_nunca_toca_o_alvo_de_symlink(tmp_path, monkeypatch)
     assert str(wt / "link_arq") in tocados and str(wt / "link_dir") in tocados
     assert "CHOWN" not in tocados
     assert not any(t.startswith(str(fora)) for t in tocados)
+
+
+async def test_ponteiro_git_vai_somente_leitura_e_quiescer_mata_todos_os_processos(tmp_path):
+    sb, docker, _ = montar(tmp_path)
+    ativo = await sb.criar(EspecSandbox("s3", str(tmp_path)))
+    run = next(c for c in docker.chamadas if c[0] == "run")
+    montagens = [run[i + 1] for i, a in enumerate(run) if a == "-v"]
+    assert f"{ativo.worktree}/.git:/workspace/.git:ro" in montagens
+    await sb.quiescer("s3")
+    assert docker.chamadas[-1] == ("rm", "-f", "forja-sbx-s3")  # mata e só volta depois de remover
+    reaberto = await sb.reabrir("s3")
+    assert reaberto.worktree == ativo.worktree and docker.chamadas[-1][0] == "run"
+    with pytest.raises(SandboxError, match="desconhecida"):
+        await sb.reabrir("outra")
+
+
+async def test_registro_do_gitdir_na_criacao_fica_fora_do_worktree_e_some_ao_destruir(tmp_path):
+    from forja.infrastructure.sandbox.worktree import caminho_do_registro, gitdir_registrado
+
+    sb, _, _ = montar(tmp_path)
+    ativo = await sb.criar(EspecSandbox("s4", str(tmp_path)))
+    registro = caminho_do_registro(ativo.worktree)
+    assert not registro.is_relative_to(ativo.worktree) and registro.exists()
+    assert gitdir_registrado(ativo.worktree)[0].name == "s4"
+    await sb.destruir("s4")
+    assert not registro.exists()
+
+
+async def test_gitdir_fora_da_area_administrativa_do_clone_recusa_a_criacao(tmp_path):
+    class GitMalicioso(GitFalso):
+        async def __call__(self, *args, cwd=None):
+            await super().__call__(*args, cwd=cwd)
+            if args[:3] == ("worktree", "add", "--detach"):
+                (Path(args[3]) / ".git").write_text("gitdir: /tmp/outro/.git\n")
+            return ""
+
+    sb = DockerSandbox(GerenciadorWorktree(tmp_path / "wt", GitMalicioso()), docker=DockerFalso())
+    with pytest.raises(SandboxError, match="área administrativa"):
+        await sb.criar(EspecSandbox("s5", str(tmp_path)))

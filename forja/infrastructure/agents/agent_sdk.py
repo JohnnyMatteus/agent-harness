@@ -93,6 +93,21 @@ class AgentSdkRunner:
         except TimeoutError:
             raise LimiteExcedidoError(f"timeout de {pedido.limites.timeout_s}s excedido") from None
 
+    @property
+    def system_prompt(self) -> str:
+        return self._system
+
+    async def executar_com_opcoes(
+        self, pedido: PedidoAgente, options: ClaudeAgentOptions
+    ) -> RespostaDoAgente:
+        """Sessão com ferramentas: as opções (CLI no sandbox, hooks, MCP) vêm de quem chama."""
+        try:
+            return await asyncio.wait_for(
+                self._conversar(pedido, options), pedido.limites.timeout_s
+            )
+        except TimeoutError:
+            raise LimiteExcedidoError(f"timeout de {pedido.limites.timeout_s}s excedido") from None
+
     async def _rodar(self, pedido: PedidoAgente) -> RespostaDoAgente:
         # cwd e HOME descartáveis: o texto do pedido é a única entrada do agente.
         with tempfile.TemporaryDirectory(prefix="forja-agente-") as raiz:

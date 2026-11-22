@@ -111,6 +111,8 @@ def argumentos_run(spec: EspecSandbox, worktree: Path, cfg: ConfigDocker) -> lis
         "--network", cfg.rede_interna,
         "--memory", cfg.memoria, "--cpus", cfg.cpus, "--pids-limit", str(cfg.pids),
         "-v", f"{worktree}:{DIR_CONTAINER}:rw",
+        # O ponteiro .git fica somente leitura: o container não o troca por um repositório falso.
+        "-v", f"{worktree}/.git:{DIR_CONTAINER}/.git:ro",
         "-w", DIR_CONTAINER,
     ]  # fmt: skip
     for chave, valor in env.items():
@@ -130,24 +132,42 @@ class DockerSandbox:
         self._cfg = cfg
         self._docker = docker
         self._repos: dict[str, Path] = {}
+        self._specs: dict[str, tuple[EspecSandbox, Path]] = {}
         self._origem = repos or {}
 
     async def criar(self, spec: EspecSandbox) -> SandboxAtivo:
         repo = self._origem.get(spec.repo_url, Path(spec.repo_url))
         worktree = await self._wt.criar(spec.sessao_id, repo, spec.ref)
         self._repos[spec.sessao_id] = repo
+        self._specs[spec.sessao_id] = (spec, worktree)
         try:
             _entregar_worktree(worktree, usuario_efetivo(self._cfg))
-            res = await self._docker(*argumentos_run(spec, worktree, self._cfg))
-            if res.codigo_saida != 0:
-                raise SandboxError(f"docker run falhou: {res.stderr.strip()}")
+            return await self._subir(spec, worktree)
         except BaseException:
             await self.destruir(spec.sessao_id)
             raise
+
+    async def _subir(self, spec: EspecSandbox, worktree: Path) -> SandboxAtivo:
+        res = await self._docker(*argumentos_run(spec, worktree, self._cfg))
+        if res.codigo_saida != 0:
+            raise SandboxError(f"docker run falhou: {res.stderr.strip()}")
         return _Ativo(spec.sessao_id, worktree, self._docker, nome_container(spec.sessao_id))
+
+    async def quiescer(self, sessao_id: str) -> None:
+        # `rm -f` mata todos os processos e só volta depois de remover o container.
+        res = await self._docker("rm", "-f", nome_container(sessao_id))
+        if res.codigo_saida != 0 and "No such container" not in res.stderr:
+            raise SandboxError(f"não foi possível parar o container: {res.stderr.strip()[:200]}")
+
+    async def reabrir(self, sessao_id: str) -> SandboxAtivo:
+        if sessao_id not in self._specs:
+            raise SandboxError("sessão desconhecida")
+        spec, worktree = self._specs[sessao_id]
+        return await self._subir(spec, worktree)
 
     async def destruir(self, sessao_id: str) -> None:
         await self._docker("rm", "-f", nome_container(sessao_id))
+        self._specs.pop(sessao_id, None)
         repo = self._repos.pop(sessao_id, None)
         if repo is not None:
             await self._wt.remover(sessao_id, repo)
