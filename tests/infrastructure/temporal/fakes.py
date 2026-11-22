@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from forja.application.portas.publicador import DestinoDaEntrega, ResultadoPublicacao
 from forja.infrastructure.temporal.activities import EtapaEntrada, EtapaSaida
@@ -121,8 +122,9 @@ class LeituraFalsa:
         self.checks = list(checks)
         # Pontas lidas da ref: a primeira é a pós-review; a lista permite simular "a branch andou".
         self.pontas = ["b" * 40]
-        self.avanco_fixo = None
+        self.avanco_fixo: Any = None
         self.heads_lidos = 0
+        self.numero_do_pr_fixo: int | None = 7
 
     async def head_da_branch(self, repositorio, branch):
         self.heads_lidos += 1
@@ -145,7 +147,7 @@ class LeituraFalsa:
         return self.checks.pop(0) if len(self.checks) > 1 else self.checks[0]
 
     async def numero_do_pr(self, repositorio, branch):
-        return 7
+        return self.numero_do_pr_fixo
 
 
 class EscritaFalsa:

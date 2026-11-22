@@ -368,6 +368,18 @@ async def test_risco_baixo_sem_auto_merge_habilitado_vai_para_o_humano_e_aprova(
     assert escrita.merges == [] and escrita.prontos == [7]  # o merge é humano
 
 
+async def test_aprovacao_sem_pr_aberto_nao_vira_comentario_de_pr_pronto(env):
+    from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
+
+    leitura = LeituraFalsa()
+    leitura.numero_do_pr_fixo = None
+    saida, pub, escrita = await _rodar_harness(
+        env, HarnessFalso(), pilha_de_revisao(leitura), aprovar="approve", automerge=False
+    )
+    assert saida.desfecho == Desfecho.FALHOU and escrita.prontos == []
+    assert not any("PR pronto" in c[1] for c in pub.comentarios)
+
+
 async def test_risco_medio_ou_alto_nunca_mescla_sozinho_mesmo_com_auto_merge(env):
     from tests.infrastructure.temporal.fakes import HarnessFalso, LeituraFalsa, pilha_de_revisao
 

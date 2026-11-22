@@ -1,6 +1,6 @@
 import pytest
 
-from forja.domain.politica import Classificacao, Tier
+from forja.domain.politica import Classificacao, Politica, Tier
 from forja.domain.revisao import (
     Achado,
     ArquivoDoDiff,
@@ -9,6 +9,7 @@ from forja.domain.revisao import (
     Severidade,
     achado_validado,
     checar_testes,
+    elevar_por_diff_incompleto,
     renderizar_review,
     tier_com_achados,
     varrer_segredos,
@@ -104,6 +105,17 @@ def test_diff_incompleto_eleva_o_tier_e_nunca_fica_baixo() -> None:
     assert tier(diff(arq("docs/a.md", "+" + "x" * TETO_DE_PATCH))) is Tier.MEDIO
     assert tier(diff(arq("docs/a.md", ""))) is Tier.MEDIO  # linhas alteradas e sem patch
     assert tier(diff(*(arq(f"docs/{i}.md", "+" + "x" * 5000) for i in range(20)))) is Tier.MEDIO
+
+
+def test_arquivo_sem_patch_e_no_minimo_medio_exceto_rename_puro() -> None:
+    p = Politica.de_dict({"risk_tiers": {"low": {"paths": ["docs/**"]}}})
+
+    def tier(d: DiffDaEntrega) -> Tier:
+        return elevar_por_diff_incompleto(p.classificar(d.caminhos, [], 0), d).tier
+
+    binario = ArquivoDoDiff("docs/blob.bin", "added", 0, 0, "")  # o revisor não viu o conteúdo
+    assert tier(diff(binario)) is Tier.MEDIO
+    assert tier(diff(ArquivoDoDiff("docs/b.md", "renamed", 0, 0, "", "docs/a.md"))) is Tier.BAIXO
 
 
 def test_rename_conta_o_caminho_de_origem() -> None:

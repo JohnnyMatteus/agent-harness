@@ -107,7 +107,11 @@ class GitHubFalso:
 
         @app.get("/repos/{dono}/{nome}/pulls")
         async def listar_prs(dono: str, nome: str, head: str) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
-            return [p for p in self.prs if f"{dono}:{p['head']}" == head]
+            return [
+                {**p, "base": {"ref": p["base"]}}  # a API devolve o destino como objeto
+                for p in self.prs
+                if f"{dono}:{p['head']}" == head
+            ]
 
         @app.post("/repos/{dono}/{nome}/pulls", status_code=201)
         async def criar_pr(dono: str, nome: str, request: Request) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]

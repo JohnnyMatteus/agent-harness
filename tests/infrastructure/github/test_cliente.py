@@ -269,6 +269,82 @@ async def test_checks_paginam_e_o_que_nao_foi_lido_e_pendente() -> None:
         await _fim(mock, http)
 
 
+async def test_statuses_paginam_e_o_estado_combinado_vale() -> None:
+    sucesso = {"name": "ci", "status": "completed", "conclusion": "success"}
+    cliente, mock, http = await _com_github(
+        {f"/repos/{REPO}/commits/{SHA}/check-runs": {"total_count": 1, "check_runs": [sucesso]}}
+    )
+    rota = mock.get(f"/repos/{REPO}/commits/{SHA}/status", params={"page": "1"})
+    pagina2 = mock.get(f"/repos/{REPO}/commits/{SHA}/status", params={"page": "2"})
+    pagina2.respond(200, json={"state": "success", "total_count": 31, "statuses": []})
+    try:
+        trinta = [{"state": "success"}] * 30
+        # 31 statuses: o 31º (página 2) falhou e o combinado também diz failure
+        rota.respond(200, json={"state": "failure", "total_count": 31, "statuses": trinta})
+        assert await cliente.estado_dos_checks(REPO, SHA) == "falhou"
+        # o combinado diz success, mas só 30 de 31 foram servidos: não é verde
+        rota.respond(200, json={"state": "success", "total_count": 31, "statuses": trinta})
+        assert await cliente.estado_dos_checks(REPO, SHA) == "pendente"
+        # o 31º, na página 2, falhou
+        pagina2.respond(
+            200, json={"state": "success", "total_count": 31, "statuses": [{"state": "failure"}]}
+        )
+        assert await cliente.estado_dos_checks(REPO, SHA) == "falhou"
+        # sem nenhum status, `pending` do combinado não trava quem só usa check runs
+        rota.respond(200, json={"state": "pending", "total_count": 0, "statuses": []})
+        assert await cliente.estado_dos_checks(REPO, SHA) == "verde"
+        # com statuses e combinado pending: pendente
+        um = [{"state": "success"}]
+        rota.respond(200, json={"state": "pending", "total_count": 1, "statuses": um})
+        assert await cliente.estado_dos_checks(REPO, SHA) == "pendente"
+    finally:
+        await _fim(mock, http)
+
+
+async def test_avanco_inclui_a_origem_de_um_rename() -> None:
+    a, b = "1" * 40, "2" * 40
+    cliente, mock, http = await _com_github(
+        {
+            f"/repos/{REPO}/compare/{a}...{b}": {
+                "total_commits": 1,
+                "files": [
+                    {
+                        "filename": ".forja/x/review.md",
+                        "status": "renamed",
+                        "previous_filename": "infra/a.tf",
+                    }
+                ],
+            }
+        }
+    )
+    try:
+        av = await cliente.avanco(REPO, a, b)
+        assert "infra/a.tf" in av.caminhos and not av.so_o_review(".forja/x/review.md")
+    finally:
+        await _fim(mock, http)
+
+
+async def test_numero_do_pr_exige_destino_na_branch_padrao() -> None:
+    cliente, mock, http = await _com_github({})
+    rota = mock.get(f"/repos/{REPO}/pulls")
+    try:
+        rota.respond(200, json=[{"number": 9, "base": {"ref": "release"}}])
+        assert await cliente.numero_do_pr(REPO, "forja/x") is None
+        rota.respond(200, json=[{"number": 9}])  # sem base legível: não vale
+        assert await cliente.numero_do_pr(REPO, "forja/x") is None
+        rota.respond(
+            200,
+            json=[
+                {"number": 9, "base": {"ref": "release"}},
+                {"number": 4, "base": {"ref": "main"}},
+            ],
+        )
+        assert await cliente.numero_do_pr(REPO, "forja/x") == 4
+        assert "base=main" in str(rota.calls.last.request.url)
+    finally:
+        await _fim(mock, http)
+
+
 async def test_politica_pr_pronto_e_merge_do_cliente() -> None:
     import base64
 

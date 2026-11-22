@@ -46,6 +46,11 @@ class ArquivoDoDiff:
     anterior: str | None = None
 
 
+def _rename_puro(a: ArquivoDoDiff) -> bool:
+    """Renomeação sem mudança de conteúdo: não há o que ler; os dois caminhos já contam."""
+    return a.status == "renamed" and a.adicoes + a.remocoes == 0
+
+
 @dataclass(frozen=True, slots=True)
 class DiffDaEntrega:
     arquivos: tuple[ArquivoDoDiff, ...]
@@ -68,8 +73,8 @@ class DiffDaEntrega:
         motivos: list[str] = []
         if any(len(a.patch) >= TETO_DE_PATCH for a in self.arquivos):
             motivos.append(f"patch de algum arquivo truncado em {TETO_DE_PATCH} caracteres")
-        if any(not a.patch and (a.adicoes + a.remocoes) > 0 for a in self.arquivos):
-            motivos.append("arquivo com linhas alteradas e sem patch (binário ou grande demais)")
+        if any(not a.patch and not _rename_puro(a) for a in self.arquivos):
+            motivos.append("arquivo sem patch (binário ou grande demais): o conteúdo não foi visto")
         total = sum(len(a.patch) + len(a.caminho) + 80 for a in self.arquivos)
         if total > TETO_DO_PROMPT:
             motivos.append(f"diff acima de {TETO_DO_PROMPT} caracteres no prompt do revisor")

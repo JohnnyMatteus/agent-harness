@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import re
 import unicodedata
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import quote
 
 import httpx
@@ -165,8 +165,12 @@ class GitHubCliente:
         c = await self._chamar(
             "GET", repositorio, f"/repos/{repositorio}/compare/{de_sha}...{para_sha}"
         )
-        arquivos = [f["filename"] for f in c.get("files", [])]
-        if len(arquivos) >= TETO_DE_ARQUIVOS:
+        arquivos: list[str] = []
+        for f in c.get("files", []):
+            arquivos.append(f["filename"])
+            if f.get("previous_filename"):
+                arquivos.append(f["previous_filename"])  # renomear de outro lugar também é mexer
+        if len(c.get("files", [])) >= TETO_DE_ARQUIVOS:
             arquivos.append("(lista truncada)")  # nunca igual a um avanço esperado
         return AvancoDaBranch(
             int(c.get("total_commits", len(c.get("commits", [])))), tuple(arquivos)
@@ -206,19 +210,38 @@ class GitHubCliente:
                 break
         if total > len(runs):
             return "pendente"  # há checks que não foram lidos
-        combinado = await self._chamar(
-            "GET", repositorio, f"/repos/{repositorio}/commits/{sha}/status"
-        )
-        statuses = combinado.get("statuses", [])
+        statuses: list[dict[str, Any]] = []
+        estado_combinado = ""
+        total_st = 0
+        for pagina in range(1, MAX_PAGINAS_DE_CHECKS + 1):
+            combinado = await self._chamar(
+                "GET",
+                repositorio,
+                f"/repos/{repositorio}/commits/{sha}/status?per_page=100&page={pagina}",
+            )
+            lidos_st = combinado.get("statuses", [])
+            if pagina == 1:  # o estado combinado é o mesmo em todas as páginas
+                estado_combinado = str(combinado.get("state", ""))
+            total_st = int(combinado.get("total_count", len(statuses) + len(lidos_st)))
+            statuses += lidos_st
+            if not lidos_st or len(statuses) >= total_st:
+                break
         if any(
             r.get("status") == "completed" and r.get("conclusion") not in CONCLUSOES_VERDES
             for r in runs
         ):
             return "falhou"
-        if any(st.get("state") in ("failure", "error") for st in statuses):
+        if estado_combinado in ("failure", "error") or any(
+            st.get("state") in ("failure", "error") for st in statuses
+        ):
             return "falhou"
-        if any(r.get("status") != "completed" for r in runs) or any(
-            st.get("state") == "pending" for st in statuses
+        if total_st > len(statuses):
+            return "pendente"  # statuses que não foram lidos: não dá para dizer que está verde
+        # Sem nenhum status (total 0), o `pending` do combinado não trava quem só usa check runs.
+        if (
+            any(r.get("status") != "completed" for r in runs)
+            or any(st.get("state") == "pending" for st in statuses)
+            or (total_st > 0 and estado_combinado == "pending")
         ):
             return "pendente"
         externos = [
@@ -230,11 +253,21 @@ class GitHubCliente:
         return "verde"
 
     async def numero_do_pr(self, repositorio: str, branch: str) -> int | None:
+        """PR aberto da branch da Forja cujo destino é a branch padrão (outro destino não vale)."""
         dono = repositorio.split("/")[0]
+        padrao = await self.branch_padrao(repositorio)
         abertos = await self._chamar(
-            "GET", repositorio, f"/repos/{repositorio}/pulls?head={quote(dono)}:{quote(branch)}"
+            "GET",
+            repositorio,
+            f"/repos/{repositorio}/pulls?state=open&head={quote(dono)}:{quote(branch)}"
+            f"&base={quote(padrao)}",
         )
-        return int(abertos[0]["number"]) if abertos else None
+        for pr in cast("list[dict[str, Any]]", abertos):
+            base: object = pr.get("base")
+            # Sem `base.ref` legível não dá para afirmar o destino: não vale.
+            if isinstance(base, dict) and cast("dict[str, Any]", base).get("ref") == padrao:
+                return int(pr["number"])
+        return None
 
     async def criar_check_run(
         self, repositorio: str, head_sha: str, nome: str, conclusao: str, titulo: str,

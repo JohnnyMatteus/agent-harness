@@ -413,6 +413,10 @@ class DeliveryWorkflow:
                 entrada,
                 "a branch mudou depois da aprovação; a aprovação valia só para o SHA revisado",
             )
+        if pronto == "sem_pr":
+            return await self._falhar(
+                entrada, "não há PR aberto desta branch para a branch padrão; nada foi marcado"
+            )
         await self._comentar(
             entrada, "aprovada", f"Aprovado por {quem}. PR pronto para revisão: o merge é humano."
         )
