@@ -4,9 +4,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from forja.application.portas.knowledge import Embedder, IndiceDeTrechos, Reranker
-from forja.domain.knowledge import Escopo, Filtro, Resultado, Trecho, fundir_rrf
+from forja.domain.knowledge import (
+    ConsultaInvalida,
+    Escopo,
+    Filtro,
+    Resultado,
+    Trecho,
+    fundir_rrf,
+)
 
 LIMITE_MAXIMO = 50
+CONSULTA_MAXIMA = 500
+DESLOCAMENTO_MAXIMO = 200
 
 
 class SemReranking:
@@ -50,22 +59,34 @@ class RecuperarConhecimento:
         deslocamento: int = 0,
         filtro: Filtro | None = None,
     ) -> Pagina:
+        if len(consulta) > CONSULTA_MAXIMA:
+            raise ConsultaInvalida(f"consulta acima de {CONSULTA_MAXIMA} caracteres")
+        if not 0 <= deslocamento <= DESLOCAMENTO_MAXIMO:
+            raise ConsultaInvalida(f"deslocamento fora de 0..{DESLOCAMENTO_MAXIMO}")
         limite = max(1, min(limite, LIMITE_MAXIMO))
-        deslocamento = max(0, deslocamento)
         filtro = filtro or Filtro()
         if not consulta.strip():
             return Pagina((), False)
         pool = max(self._pool, deslocamento + limite + 1)
-        lexicais = self._indice.buscar_lexical(escopo, consulta, pool, filtro)
+        # O índice não é confiável para o isolamento: filtra antes da fusão e do reranker
+        # (que pode ser uma API externa) e de novo depois dele.
+        lexicais = [
+            t
+            for t in self._indice.buscar_lexical(escopo, consulta, pool, filtro)
+            if t.escopo == escopo
+        ]
         (vetor,) = self._embedder.embutir([consulta])
-        vetoriais = self._indice.buscar_vetorial(escopo, vetor, pool, filtro)
+        vetoriais = [
+            t
+            for t in self._indice.buscar_vetorial(escopo, vetor, pool, filtro)
+            if t.escopo == escopo
+        ]
 
         por_id = {t.id: t for t in [*lexicais, *vetoriais]}
         fundidos = fundir_rrf([[t.id for t in lexicais], [t.id for t in vetoriais]])
         pontos = dict(fundidos)
         ordenados = self._reranker.reordenar(consulta, [por_id[i] for i, _ in fundidos])
-        # Defesa em profundidade: um índice com defeito nunca devolve trecho de outro escopo.
-        ordenados = [t for t in ordenados if t.escopo == escopo]
+        ordenados = [t for t in ordenados if t.escopo == escopo and t.id in por_id]
         janela = ordenados[deslocamento : deslocamento + limite]
         return Pagina(
             tuple(Resultado(t, pontos[t.id]) for t in janela),

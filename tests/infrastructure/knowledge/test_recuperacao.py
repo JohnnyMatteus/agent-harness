@@ -1,8 +1,16 @@
+from collections.abc import Sequence
+
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from forja.application.casos_de_uso.recuperar_conhecimento import RecuperarConhecimento
+from forja.application.casos_de_uso.recuperar_conhecimento import (
+    CONSULTA_MAXIMA,
+    DESLOCAMENTO_MAXIMO,
+    RecuperarConhecimento,
+)
 from forja.domain.knowledge import (
+    ConsultaInvalida,
     Escopo,
     Filtro,
     TipoDeTrecho,
@@ -126,3 +134,49 @@ def test_rrf_propriedades(listas: list[list[str]]) -> None:
     pontos = [p for _, p in fundido]
     assert pontos == sorted(pontos, reverse=True)
     assert fundir_rrf(listas) == fundido
+
+
+def test_reranker_nunca_recebe_trecho_de_outro_escopo_nem_o_distorce() -> None:
+    class Defeituoso(IndiceEmMemoria):
+        def buscar_lexical(
+            self, escopo: Escopo, consulta: str, limite: int, filtro: Filtro
+        ) -> list[Trecho]:
+            return [
+                *super().buscar_lexical(A, consulta, limite, filtro),
+                *super().buscar_lexical(B, consulta, limite, filtro),
+            ]
+
+        def buscar_vetorial(
+            self, escopo: Escopo, vetor: Sequence[float], limite: int, filtro: Filtro
+        ) -> list[Trecho]:
+            return super().buscar_vetorial(B, vetor, limite, filtro)
+
+    class Espiao:
+        def __init__(self) -> None:
+            self.vistos: list[Escopo] = []
+
+        def reordenar(self, consulta: str, candidatos: Sequence[Trecho]) -> list[Trecho]:
+            self.vistos += [t.escopo for t in candidatos]
+            return list(reversed(candidatos))
+
+    indice = Defeituoso()
+    indexar(
+        indice,
+        trecho(A, "a.py", "f", "def f(): token"),
+        trecho(B, "b.py", "f", "def f(): token"),
+    )
+    espiao = Espiao()
+    pagina = RecuperarConhecimento(indice, EMB, espiao).buscar(A, "token f")
+    assert espiao.vistos == [A]
+    assert [r.trecho.escopo for r in pagina.itens] == [A]
+
+
+def test_tetos_de_consulta_e_deslocamento_valem_no_caso_de_uso() -> None:
+    caso = RecuperarConhecimento(IndiceEmMemoria(), EMB)
+    with pytest.raises(ConsultaInvalida):
+        caso.buscar(A, "x" * (CONSULTA_MAXIMA + 1))
+    with pytest.raises(ConsultaInvalida):
+        caso.buscar(A, "x", deslocamento=DESLOCAMENTO_MAXIMO + 1)
+    with pytest.raises(ConsultaInvalida):
+        caso.buscar(A, "x", deslocamento=-1)
+    assert caso.buscar(A, "x" * CONSULTA_MAXIMA, deslocamento=DESLOCAMENTO_MAXIMO).itens == ()
